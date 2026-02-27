@@ -1,0 +1,976 @@
+"""Telegram Bot service for whale order monitoring."""
+
+from __future__ import annotations
+
+import logging
+import asyncio
+import re
+import csv
+import io
+import json
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Optional
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
+
+from config.settings import get_settings
+from src.storage.user_database import UserDatabase
+from src.telegram.user_manager import UserManager
+from src.telegram.push_dispatcher import PushDispatcher
+
+if TYPE_CHECKING:
+    from src.storage.user_database import UserDatabase
+    from src.telegram.user_manager import UserManager
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramBot:
+    """Telegram Bot for whale order alerts and analysis."""
+
+    def __init__(
+        self,
+        user_db: UserDatabase,
+        push_dispatcher: PushDispatcher,
+        dialog_handler: "Optional[DialogHandler]" = None,
+        db: "Optional[object]" = None,
+        ai_client: "Optional[object]" = None,
+    ) -> None:
+        self.settings = get_settings()
+        self.user_db = user_db
+        self.push_dispatcher = push_dispatcher
+        self.dialog_handler = dialog_handler
+        self.user_manager = UserManager(user_db)
+        self.ai_client = ai_client  # DeepseekClient for /ask
+        self.db = db  # main whale_orders database
+
+        self._application:Optional[ Application] = None
+
+    async def start(self) -> None:
+        """Start the Telegram Bot."""
+        if not self.settings.tg_enabled or not self.settings.tg_bot_token:
+            logger.warning("Telegram Bot not configured or disabled")
+            return
+
+        self._application = Application.builder().token(
+            self.settings.tg_bot_token
+        ).build()
+
+        # Register handlers
+        self._register_handlers()
+
+        # Start the bot
+        await self._application.initialize()
+        
+        # Set command menu
+        if self._application.bot:
+            await self._application.bot.set_my_commands([
+                ("start", "开始使用 / Start Bot"),
+                ("help", "显示帮助 / Show Help"),
+                ("language", "设置语言 / Language Settings"),
+                ("status", "系统状态 / System Status"),
+                ("stats", "个人统计 / Personal Stats"),
+                ("subscribe", "订阅管理 / Manage Subscriptions"),
+            ])
+            
+        await self._application.start()
+        await self._application.updater.start_polling(drop_pending_updates=True)
+
+        logger.info(
+            "Telegram Bot started successfully. Admins: %s",
+            self.settings.tg_admin_id_list,
+        )
+
+    async def stop(self) -> None:
+        """Stop the Telegram Bot."""
+        if self._application:
+            await self._application.updater.stop()
+            await self._application.stop()
+            await self._application.shutdown()
+            logger.info("Telegram Bot stopped")
+
+    def _register_handlers(self) -> None:
+        """Register all command and message handlers."""
+        app = self._application
+
+        # Command handlers
+        app.add_handler(CommandHandler("start", self._start_command))
+        app.add_handler(CommandHandler("help", self._help_command))
+        app.add_handler(CommandHandler("language", self._language_command))
+        app.add_handler(CommandHandler("subscribe", self._subscribe_command))
+        app.add_handler(CommandHandler("stats", self._stats_command))
+        app.add_handler(CommandHandler("status", self._status_command))
+
+        # Job Offerings commands
+        app.add_handler(CommandHandler("query", self._query_command))
+        app.add_handler(CommandHandler("export", self._export_command))
+        app.add_handler(CommandHandler("ask", self._ask_command))
+        app.add_handler(CommandHandler("buy", self._buy_command))
+        app.add_handler(CommandHandler("sell", self._sell_command))
+        app.add_handler(CommandHandler("positions", self._positions_command))
+        app.add_handler(CommandHandler("balance", self._balance_command))
+
+        # Admin commands
+        app.add_handler(CommandHandler("approve", self._approve_command))
+        app.add_handler(CommandHandler("revoke", self._revoke_command))
+        app.add_handler(CommandHandler("users", self._users_command))
+
+        # Callback handlers
+        app.add_handler(CallbackQueryHandler(self._callback_handler))
+
+        # Message handler for general text
+        app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._message_handler)
+        )
+
+    # ==================== Command Handlers ====================
+
+    async def _start_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /start command."""
+        user_id = update.effective_user.id
+        user = await self.user_manager.register_user(
+            telegram_id=user_id,
+            username=update.effective_user.username,
+            first_name=update.effective_user.first_name,
+            last_name=update.effective_user.last_name,
+        )
+
+        await self.user_manager.update_activity(user_id)
+        
+        # Invitation code logic
+        if context.args and len(context.args) > 0 and context.args[0] == "Ocean1":
+            if not user.is_active:
+                # Direct DB access to activate since approve_user expects an admin_id
+                await self.user_manager.db.activate_user(user_id)
+                user = await self.user_manager.get_user(user_id)
+                await update.message.reply_text("🎉 邀请码验证成功！您的账号已激活。 / Invite code verified! Account activated.")
+                
+        # Always show job offerings layout
+        if user.language == "en":
+            welcome_header = (
+                "🤖 Hey! I am your BTC Whale Monitoring AI Agent.\n\n"
+                "I am an AI Data Analyst focusing on on-chain tracking and exchange whale movements.\n"
+                "You can hire me for the following tasks—from data queries to trade execution, charged per task.\n\n"
+            )
+            
+            menu_body = (
+                "—— 📊 Data Query —— as low as $0.10/time\n"
+                "· Whale Order Tracking → /query large        $0.10\n"
+                "· On-chain Tracking → /query onchain         $0.10\n"
+                "· Spot Order Book Tracking → /query spot     $0.20\n"
+                "· Futures Depth Tracking → /query futures    $0.20\n\n"
+                "—— 📥 Data Export —— $0.80/time\n"
+                "· Export Whale Trades + Orderbook\n"
+                "→ /export <symbol>                           $0.80\n"
+                "Delivery: CSV (Trades) + JSON (Depth)\n\n"
+                "—— 🤖 AI Analysis —— $0.50 ~ $1.00/time\n"
+                "· AI Q&A → /ask <question>                   $0.50\n"
+                "· Deep Market Analysis + Trade Signals\n"
+                "→ /ask <question> [symbol]                   $1.00\n"
+                "Signals based on real trades + whale positions\n\n"
+                "—— 💰 Trade Execution —— $1.00/tx\n"
+                "· Copy Buy → /buy                            $1.00\n"
+                "· Copy Sell → /sell                          $1.00\n"
+                "· Check Positions → /positions               $0.10\n"
+                "· Check Balance → /balance                   $0.10\n\n"
+                "—— 🔧 Account Management —— Free\n"
+                "/subscribe · /status · /stats · /language\n\n"
+                "💡 Support symbol parameters (e.g. BTC, ETH, SOL).\n"
+                "Type /help to see the full menu anytime."
+            )
+            
+            if not user.is_active:
+                msg = welcome_header + "⚠️ **You need to input an invite code (like `/start Ocean1`) or wait for admin approval to use these services.**\n\n" + menu_body
+            else:
+                msg = welcome_header + menu_body
+        else:
+            welcome_header = (
+                "🤖 Hey! 我是您的 BTC Whale Monitoring AI Agent.\n\n"
+                "我是一个专注于 比特币链上及交易所巨鲸动向 的 AI 数据分析师。\n"
+                "您可以雇佣我完成以下工作——从数据查询到下单跟单，按件计费。\n\n"
+            )
+            
+            menu_body = (
+                "—— 📊 数据查询 —— 低至 $0.10/次\n"
+                "· 巨鲸大单追踪 → /query large        $0.10\n"
+                "· 链上异动追踪 → /query onchain      $0.10\n"
+                "· 现货大单追踪 → /query spot         $0.20\n"
+                "· 合约深度追踪 → /query futures      $0.20\n\n"
+                "—— 📥 数据导出 —— $0.80/次\n"
+                "· 导出鲸鱼真实成交 + 订单簿\n"
+                "→ /export <币种>                     $0.80\n"
+                "交付: CSV (成交记录) + JSON (完整深度)\n\n"
+                "—— 🤖 AI 分析 —— $0.50 ~ $1.00/次\n"
+                "· AI 智能问答 → /ask <问题>          $0.50\n"
+                "· 锁定行情深度分析 + 下单建议\n"
+                "→ /ask <问题> [币种]                 $1.00\n"
+                "基于真实成交 + 巨鲸持仓数据给出方向建议\n\n"
+                "—— 💰 交易执行 —— $1.00/笔\n"
+                "· 自动跟单买入 → /buy                  $1.00\n"
+                "· 自动跟单卖出 → /sell                 $1.00\n"
+                "· 查持仓 → /positions                $0.10\n"
+                "· 查余额 → /balance                  $0.10\n\n"
+                "—— 🔧 账户管理 —— 免费\n"
+                "/subscribe · /status · /stats · /language\n\n"
+                "💡 所有「币种」参数支持币种代号 (如 BTC, ETH, SOL)。\n"
+                "输入 /help 随时查看完整菜单。"
+            )
+            
+            if not user.is_active:
+                msg = welcome_header + "⚠️ **您需要输入邀请码（例如发送 `/start Ocean1`）或等待管理员审核才能正式使用。**\n\n" + menu_body
+            else:
+                msg = welcome_header + menu_body
+            
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _language_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /language command."""
+        user_id = update.effective_user.id
+        user = await self.user_manager.get_user(user_id)
+        if not user:
+            return
+            
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🇺🇸 English", callback_data="set_lang_en"),
+                InlineKeyboardButton("🇨🇳 中文", callback_data="set_lang_zh"),
+            ]
+        ])
+        
+        msg = "Please select your preferred language / 请选择您的首选语言:"
+        await update.message.reply_text(msg, reply_markup=keyboard)
+
+    async def _help_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /help command."""
+        help_text = """
+*🐋 BTC 鲸鱼订单监控系统*
+
+*基础命令：*
+/start - 开始使用
+/help - 显示帮助信息
+/status - 查看系统状态
+/stats - 查看个人统计
+
+*订阅管理：*
+/subscribe - 设置订阅偏好
+
+*查询命令（自然语言）：*
+• "最近 1 小时的大单趋势"
+• "分析 Binance 的大单"
+• "给我看最近的爆仓单"
+
+*管理员命令：*
+/approve <user_id> - 审核用户
+/revoke <user_id> - 撤销用户
+/users - 查看所有用户
+
+💡 提示：发送任意问题即可获取 AI 分析结果！
+        """
+        await update.message.reply_text(help_text, parse_mode="Markdown")
+
+    async def _subscribe_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /subscribe command."""
+        user_id = update.effective_user.id
+
+        if not await self.user_manager.is_active(user_id):
+            await update.message.reply_text(
+                "您的账号尚未激活，请等待管理员审核。"
+            )
+            return
+
+        # Create subscription menu
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Binance", callback_data="sub_binance"),
+                InlineKeyboardButton("OKX", callback_data="sub_okx"),
+            ],
+            [
+                InlineKeyboardButton("Bybit", callback_data="sub_bybit"),
+                InlineKeyboardButton("全部交易所", callback_data="sub_all"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "设置金额阈值", callback_data="sub_threshold"
+                ),
+                InlineKeyboardButton("完成", callback_data="sub_done"),
+            ],
+        ])
+
+        user = await self.user_manager.get_user(user_id)
+        current_exchanges = (
+            ", ".join(user.subscribed_exchanges)
+            if user.subscribed_exchanges
+            else "全部"
+        )
+
+        await update.message.reply_text(
+            f"*订阅设置*\n\n"
+            f"当前订阅的交易所: {current_exchanges}\n"
+            f"当前金额阈值: ${user.min_alert_threshold:,.0f}\n\n"
+            f"请选择要订阅的交易所或设置金额阈值:",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+        )
+
+    async def _status_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /status command."""
+        status_text = f"""
+*📊 系统状态*
+
+🔴 CoinGlass API: 运行中
+🤖 AI 分析: {'运行中' if self.settings.deepseek_api_key else '未配置'}
+
+👥 活跃用户: {len(await self.user_manager.get_all_active_users())}
+
+📡 监控的交易所: {', '.join(get_settings().exchange_list)}
+
+⚙️ 配置的交易所: {get_settings().exchanges}
+        """
+
+        await update.message.reply_text(status_text, parse_mode="Markdown")
+
+    async def _stats_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /stats command."""
+        user_id = update.effective_user.id
+
+        if not await self.user_manager.is_active(user_id):
+            await update.message.reply_text(
+                "您的账号尚未激活，请等待管理员审核。"
+            )
+            return
+
+        user = await self.user_manager.get_user(user_id)
+
+        # Fetch user's alert statistics
+        # Get user's recent alert count from chat history
+        async with self.user_db._conn.execute(
+            """SELECT COUNT(*) as count FROM chat_history
+               WHERE user_id = ? AND role = 'assistant'
+               AND timestamp > strftime('%s', 'now', '-1 day')""",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            alerts_today = row["count"] if row else 0
+
+        stats_text = f"""*📈 个人统计*
+
+👤 **用户 ID:** `{user.telegram_id}`
+✅ **状态:** {'活跃' if user.is_active else '未激活'}
+
+📊 **订阅设置:**
+   • 交易所: {', '.join(user.subscribed_exchanges) if user.subscribed_exchanges else '全部'}
+   • 金额阈值: ${user.min_alert_threshold:,.0f}
+
+📅 **注册时间:** {user.created_at.strftime('%Y-%m-%d %H:%M')}
+🕐 **最后活跃:** {user.last_active_at.strftime('%Y-%m-%d %H:%M') if user.last_active_at else '无'}
+
+🔔 **24小时告警数:** {alerts_today}"""
+
+        await update.message.reply_text(stats_text, parse_mode="Markdown")
+
+    async def _execute_dummy_job(self, update: Update, command_name: str, english_name: str, chinese_name: str, price: float) -> None:
+        """Helper to check permissions and run a simulated job."""
+        user_id = update.effective_user.id
+        user = await self.user_manager.get_user(user_id)
+        if not user:
+            return
+
+        if not user.is_active:
+            msg = "⚠️ Please input invite code (e.g. `/start Ocean1`) first." if user.language == "en" else "⚠️ 请先输入验证码激活（例如：`/start Ocean1`）"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            return
+
+        job_name = english_name if user.language == "en" else chinese_name
+        
+        btn_text = f"💳 Pay ${price:.2f}" if user.language == "en" else f"💳 确认支付 ${price:.2f}"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(btn_text, callback_data=f"pay_job_{command_name}")]
+        ])
+        
+        if user.language == "en":
+            msg = (
+                f"🧾 **Virtual Invoice**\n\n"
+                f"Target Job: **{job_name}**\n"
+                f"Total Cost: **${price:.2f}**\n\n"
+                f"Please complete your payment below to execute task:"
+            )
+        else:
+            msg = (
+                f"🧾 **虚拟账单**\n\n"
+                f"您选择了服务：**{job_name}**\n"
+                f"服务费用：**${price:.2f}**\n\n"
+                f"请点击下方按钮完成支付以启动任务："
+            )
+        await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
+
+    async def _query_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._execute_dummy_job(update, "query", "Data Query", "数据查询", 0.20)
+
+    async def _export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /export command — show exchange picker before exporting."""
+        user_id = update.effective_user.id
+        user = await self.user_manager.get_user(user_id)
+        if not user:
+            return
+
+        if not user.is_active:
+            msg = "⚠️ Please input invite code (e.g. `/start Ocean1`) first." if user.language == "en" else "⚠️ 请先输入验证码激活（例如：`/start Ocean1`）"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            return
+
+        # Parse symbol from args (default BTC)
+        symbol_filter = "BTC"
+        if context.args and len(context.args) > 0:
+            symbol_filter = context.args[0].upper()
+        elif update.message and update.message.text:
+            parts = update.message.text.strip().split()
+            if len(parts) > 1:
+                symbol_filter = parts[1].upper()
+
+        # Show exchange picker
+        if user.language == "en":
+            msg = f"📥 **Export {symbol_filter} Whale Orders**\n\nPlease select the exchange to export from:"
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_do_{symbol_filter}_Hyperliquid"),
+                    InlineKeyboardButton("Binance", callback_data=f"export_do_{symbol_filter}_Binance"),
+                ],
+                [
+                    InlineKeyboardButton("OKX", callback_data=f"export_do_{symbol_filter}_OKX"),
+                    InlineKeyboardButton("🌐 All Exchanges", callback_data=f"export_do_{symbol_filter}_ALL"),
+                ]
+            ])
+        else:
+            msg = f"📥 **导出 {symbol_filter} 巨鲸订单**\n\n请选择您想导出的交易所："
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_do_{symbol_filter}_Hyperliquid"),
+                    InlineKeyboardButton("Binance", callback_data=f"export_do_{symbol_filter}_Binance"),
+                ],
+                [
+                    InlineKeyboardButton("OKX", callback_data=f"export_do_{symbol_filter}_OKX"),
+                    InlineKeyboardButton("🌐 全部交易所", callback_data=f"export_do_{symbol_filter}_ALL"),
+                ]
+            ])
+        await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
+
+    async def _do_export(self, query, user, symbol_filter: str, exchange_filter: str) -> None:
+        """Actually perform the CSV+JSON export after exchange selection."""
+        if not self.db or not hasattr(self.db, '_conn') or self.db._conn is None:
+            msg = "❌ Database not available." if user.language == "en" else "❌ 数据库尚未就绪，请稍后重试。"
+            await query.edit_message_text(msg)
+            return
+
+        exchange_label = exchange_filter if exchange_filter != "ALL" else ("All Exchanges" if user.language == "en" else "全部交易所")
+        status_msg = f"⏳ Querying {symbol_filter} orders from {exchange_label}..." if user.language == "en" else f"⏳ 正在查询 {exchange_label} 的 {symbol_filter} 巨鲸订单..."
+        await query.edit_message_text(status_msg)
+
+        try:
+            if exchange_filter == "ALL":
+                sql = "SELECT * FROM whale_orders WHERE symbol LIKE ? ORDER BY timestamp DESC LIMIT 200"
+                params = (f"%{symbol_filter}%",)
+            else:
+                sql = "SELECT * FROM whale_orders WHERE symbol LIKE ? AND exchange = ? ORDER BY timestamp DESC LIMIT 200"
+                params = (f"%{symbol_filter}%", exchange_filter)
+
+            async with self.db._conn.execute(sql, params) as cursor:
+                rows = await cursor.fetchall()
+
+            if not rows:
+                no_data = f"📭 No {symbol_filter} orders found on {exchange_label}." if user.language == "en" else f"📭 {exchange_label} 上暂无 {symbol_filter} 相关订单。"
+                await query.edit_message_text(no_data)
+                return
+
+            records = [dict(r) for r in rows]
+            today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+            suffix = exchange_filter if exchange_filter != "ALL" else "ALL"
+
+            # --- CSV ---
+            csv_buf = io.StringIO()
+            cols = ["timestamp", "exchange", "symbol", "side", "price", "amount_usd", "quantity", "order_type", "status", "source"]
+            writer = csv.DictWriter(csv_buf, fieldnames=cols, extrasaction="ignore")
+            writer.writeheader()
+            for rec in records:
+                rc = dict(rec)
+                ts = rc.get("timestamp", 0)
+                if ts:
+                    rc["timestamp"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                writer.writerow(rc)
+            csv_bytes = csv_buf.getvalue().encode("utf-8")
+            csv_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.csv"
+
+            # --- JSON ---
+            jrs = []
+            for rec in records:
+                jr = dict(rec)
+                ts = jr.get("timestamp", 0)
+                if ts:
+                    jr["timestamp_utc"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if isinstance(jr.get("metadata"), str):
+                    try:
+                        jr["metadata"] = json.loads(jr["metadata"])
+                    except json.JSONDecodeError:
+                        pass
+                jrs.append(jr)
+            json_bytes = json.dumps(jrs, ensure_ascii=False, indent=2).encode("utf-8")
+            json_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.json"
+
+            if user.language == "en":
+                caption = f"📊 **{symbol_filter} Whale Orders — {exchange_label}**\n\nRecords: **{len(records)}**\nFormat: CSV + JSON"
+            else:
+                caption = f"📊 **{symbol_filter} 巨鲸订单 — {exchange_label}**\n\n记录数: **{len(records)}**\n格式: CSV + JSON"
+
+            await query.edit_message_text(
+                f"✅ {len(records)} records found. Sending..." if user.language == "en" else f"✅ 找到 {len(records)} 条记录，发送中..."
+            )
+
+            chat_id = query.message.chat_id
+            await query.message.reply_document(
+                document=io.BytesIO(csv_bytes), filename=csv_fn, caption=caption, parse_mode="Markdown"
+            )
+            await query.message.reply_document(
+                document=io.BytesIO(json_bytes), filename=json_fn
+            )
+
+        except Exception as e:
+            logger.error("Export failed: %s", e, exc_info=True)
+            await query.edit_message_text(f"❌ Export failed: {e}" if user.language == "en" else f"❌ 导出失败: {e}")
+
+    async def _ask_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /ask command — real Deepseek AI analysis with chat memory."""
+        user_id = update.effective_user.id
+        user = await self.user_manager.get_user(user_id)
+        if not user:
+            return
+
+        if not user.is_active:
+            msg = "⚠️ Please input invite code (e.g. `/start Ocean1`) first." if user.language == "en" else "⚠️ 请先输入验证码激活（例如：`/start Ocean1`）"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            return
+
+        # Extract the question from args or raw text
+        question = ""
+        if context.args:
+            question = " ".join(context.args)
+        elif update.message and update.message.text:
+            text = update.message.text.strip()
+            for prefix in ["/ask", "ask", "分析", "Ask"]:
+                if text.lower().startswith(prefix.lower()):
+                    text = text[len(prefix):].strip()
+                    break
+            question = text
+
+        if not question:
+            hint = "💡 Usage: `/ask <your question>`\nExample: `/ask What is the current whale trend for BTC?`" if user.language == "en" else "💡 用法：`/ask <您的问题>`\n示例：`/ask BTC巨鲸最近的买卖趋势是什么？`"
+            await update.message.reply_text(hint, parse_mode="Markdown")
+            return
+
+        if not self.ai_client:
+            await update.message.reply_text("❌ AI client not configured." if user.language == "en" else "❌ AI 分析服务未配置。")
+            return
+
+        thinking_msg = "🧠 Analyzing with AI..." if user.language == "en" else "🧠 AI 正在分析中..."
+        progress = await update.message.reply_text(thinking_msg)
+
+        try:
+            # 1. Save user's question to chat history
+            await self.user_db.add_chat_message(user_id, "user", question)
+
+            # 2. Load recent chat history for multi-turn memory
+            chat_history = None
+            try:
+                history_msgs = await self.user_db.get_chat_history(user_id, limit=6)
+                if history_msgs:
+                    chat_history = [
+                        {"role": m.role, "content": m.content}
+                        for m in history_msgs
+                        if m.content != question  # exclude current question (will be added by answer_query)
+                    ]
+            except Exception as e:
+                logger.warning("Failed to load chat history: %s", e)
+
+            # 3. Fetch recent whale data from DB for context
+            data_context = {}
+            if self.db and hasattr(self.db, '_conn') and self.db._conn:
+                async with self.db._conn.execute(
+                    "SELECT COUNT(*) as cnt, AVG(amount_usd) as avg_amt FROM whale_orders WHERE timestamp > ?",
+                    (int((datetime.now(timezone.utc).timestamp() - 3600) * 1000),)
+                ) as cur:
+                    row = await cur.fetchone()
+                    data_context["orders_last_1h"] = row["cnt"] if row else 0
+                    data_context["avg_amount_1h"] = round(row["avg_amt"] or 0, 2) if row else 0
+
+                async with self.db._conn.execute(
+                    """SELECT side, COUNT(*) as cnt, SUM(amount_usd) as total
+                       FROM whale_orders WHERE timestamp > ?
+                       GROUP BY side""",
+                    (int((datetime.now(timezone.utc).timestamp() - 3600) * 1000),)
+                ) as cur:
+                    sides = await cur.fetchall()
+                    for s in sides:
+                        data_context[f"{s['side']}_count"] = s["cnt"]
+                        data_context[f"{s['side']}_total_usd"] = round(s["total"] or 0, 2)
+
+                async with self.db._conn.execute(
+                    "SELECT * FROM whale_orders ORDER BY timestamp DESC LIMIT 5"
+                ) as cur:
+                    recent = await cur.fetchall()
+                    recent_summary = []
+                    for r in recent:
+                        d = dict(r)
+                        recent_summary.append({
+                            "exchange": d["exchange"], "symbol": d["symbol"],
+                            "side": d["side"], "amount_usd": d["amount_usd"],
+                            "price": d["price"], "order_type": d["order_type"]
+                        })
+                    data_context["recent_5_orders"] = recent_summary
+
+            # 4. Call Deepseek AI with chat history
+            response = await self.ai_client.answer_query(question, data_context, chat_history=chat_history)
+
+            # 5. Save AI response to chat history
+            await self.user_db.add_chat_message(user_id, "assistant", response)
+
+            await progress.edit_text(f"🤖 **AI Analysis**\n\n{response}", parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error("AI ask failed: %s", e, exc_info=True)
+            await progress.edit_text(f"❌ AI analysis failed: {e}" if user.language == "en" else f"❌ AI 分析失败: {e}")
+
+    async def _buy_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._execute_dummy_job(update, "buy", "Copy Buy", "跟单买入", 1.00)
+
+    async def _sell_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._execute_dummy_job(update, "sell", "Copy Sell", "跟单卖出", 1.00)
+
+    async def _positions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._execute_dummy_job(update, "positions", "Check Positions", "查询持仓", 0.10)
+
+    async def _balance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._execute_dummy_job(update, "balance", "Check Balance", "查询余额", 0.10)
+
+    # ==================== Admin Commands ====================
+
+    async def _approve_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /approve command (admin only)."""
+        user_id = update.effective_user.id
+
+        if not await self.user_manager.is_admin(user_id):
+            await update.message.reply_text("⛔ 仅管理员可使用此命令")
+            return
+
+        if not context.args or len(context.args) != 1:
+            await update.message.reply_text("用法: /approve <user_id>")
+            return
+
+        target_id = int(context.args[0])
+        success = await self.user_manager.approve_user(target_id, user_id)
+
+        if success:
+            await update.message.reply_text(f"✅ 用户 {target_id} 已激活")
+        else:
+            await update.message.reply_text("❌ 激活失败")
+
+    async def _revoke_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /revoke command (admin only)."""
+        user_id = update.effective_user.id
+
+        if not await self.user_manager.is_admin(user_id):
+            await update.message.reply_text("⛔ 仅管理员可使用此命令")
+            return
+
+        if not context.args or len(context.args) != 1:
+            await update.message.reply_text("用法: /revoke <user_id>")
+            return
+
+        target_id = int(context.args[0])
+        success = await self.user_manager.revoke_user(target_id, user_id)
+
+        if success:
+            await update.message.reply_text(f"✅ 用户 {target_id} 已撤销")
+        else:
+            await update.message.reply_text("❌ 撤销失败")
+
+    async def _users_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /users command (admin only)."""
+        user_id = update.effective_user.id
+
+        if not await self.user_manager.is_admin(user_id):
+            await update.message.reply_text("⛔ 仅管理员可使用此命令")
+            return
+
+        users = await self.user_manager.get_all_users()
+
+        if not users:
+            await update.message.reply_text("暂无用户")
+            return
+
+        # Build user list (limit to first 20)
+        user_list = "*用户列表:*\n\n"
+        for user in users[:20]:
+            status = "✅" if user.is_active else "⏳"
+            admin = " (管理员)" if user.is_admin else ""
+            user_list += f"{status} `{user.telegram_id}` - {user.username or 'N/A'}{admin}\n"
+
+        if len(users) > 20:
+            user_list += f"\n... 还有 {len(users) - 20} 位用户"
+
+        await update.message.reply_text(user_list, parse_mode="Markdown")
+
+    # ==================== Callback Handlers ====================
+
+    async def _callback_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle inline keyboard callbacks."""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = query.from_user.id
+        user = await self.user_manager.get_user(user_id)
+
+        if not user:
+            return
+
+        data = query.data
+        
+        # Language selection
+        if data.startswith("set_lang_"):
+            lang_code = data.split("_")[2]
+            await self.user_manager.update_subscription(user_id, language=lang_code)
+            msg = "✅ Language updated successfully!" if lang_code == "en" else "✅ 语言设置已更新！"
+            await query.edit_message_text(msg)
+            return
+
+        if data == "sub_done":
+            msg = "✅ Subscription settings saved!" if user.language == "en" else "✅ 订阅设置已保存！"
+            await query.edit_message_text(msg)
+            return
+
+        # Export exchange selection callback: export_do_{SYMBOL}_{EXCHANGE}
+        if data.startswith("export_do_"):
+            parts = data.split("_", 3)  # ['export', 'do', 'BTC', 'Hyperliquid']
+            if len(parts) >= 4:
+                symbol_filter = parts[2]
+                exchange_filter = parts[3]
+                await self._do_export(query, user, symbol_filter, exchange_filter)
+            return
+
+
+        elif data.startswith("pay_job_"):
+            if not user.is_active:
+                await query.answer(
+                    "⚠️ Please input invite code (e.g. /start Ocean1) first." if user.language == "en" else "⚠️ 请先输入验证码激活（例如：/start Ocean1）",
+                    show_alert=True
+                )
+                return
+                
+            job_types = {
+                "pay_job_query": ("📊 Data Query", "📊 数据查询"),
+                "pay_job_ai": ("🤖 AI Analysis", "🤖 AI 深度分析"),
+                "pay_job_export": ("📥 Export Real Data", "📥 导出真实数据"),
+                "pay_job_buy": ("📈 Copy Buy", "📈 跟单买入"),
+                "pay_job_sell": ("📉 Copy Sell", "📉 跟单卖出"),
+                "pay_job_positions": ("💼 Check Positions", "💼 查询持仓"),
+                "pay_job_balance": ("💰 Check Balance", "💰 查询余额")
+            }
+            if data in job_types:
+                names = job_types[data]
+                job_name = names[0] if user.language == "en" else names[1]
+                
+                if user.language == "en":
+                    msg = (
+                        f"✅ **Payment Successful!**\n\n"
+                        f"Funds received! I am now executing **{job_name}** for you...\n"
+                        f"(This feature is for demonstration, no real funds were moved)"
+                    )
+                else:
+                    msg = (
+                        f"✅ **支付成功！**\n\n"
+                        f"我已经收到了您的付款，正在为您执行 **{job_name}** 任务...\n"
+                        f"（此功能为演示效果，未实际扣取您的资金）"
+                    )
+                await query.edit_message_text(msg, parse_mode="Markdown")
+            return
+
+        elif data == "sub_all":
+            await self.user_manager.update_subscription(
+                user_id, subscribed_exchanges=[]
+            )
+
+        elif data == "sub_binance":
+            exchanges = user.subscribed_exchanges or []
+            if "Binance" in exchanges:
+                exchanges = [e for e in exchanges if e != "Binance"]
+            else:
+                exchanges.append("Binance")
+            await self.user_manager.update_subscription(
+                user_id, subscribed_exchanges=exchanges
+            )
+
+        elif data == "sub_okx":
+            exchanges = user.subscribed_exchanges or []
+            if "OKX" in exchanges:
+                exchanges = [e for e in exchanges if e != "OKX"]
+            else:
+                exchanges.append("OKX")
+            await self.user_manager.update_subscription(
+                user_id, subscribed_exchanges=exchanges
+            )
+
+        elif data == "sub_bybit":
+            exchanges = user.subscribed_exchanges or []
+            if "Bybit" in exchanges:
+                exchanges = [e for e in exchanges if e != "Bybit"]
+            else:
+                exchanges.append("Bybit")
+            await self.user_manager.update_subscription(
+                user_id, subscribed_exchanges=exchanges
+            )
+
+        elif data == "sub_threshold":
+            # TODO: Implement threshold setting dialog
+            await query.edit_message_text(
+                "请输入新的金额阈值（美元），例如: 500000"
+            )
+            return
+
+        # Update the keyboard
+        user = await self.user_manager.get_user(user_id)
+        current_exchanges = (
+            ", ".join(user.subscribed_exchanges)
+            if user.subscribed_exchanges
+            else "全部"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"{'✅ ' if 'Binance' in (user.subscribed_exchanges or []) else ''}Binance",
+                    callback_data="sub_binance",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if 'OKX' in (user.subscribed_exchanges or []) else ''}OKX",
+                    callback_data="sub_okx",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'✅ ' if 'Bybit' in (user.subscribed_exchanges or []) else ''}Bybit",
+                    callback_data="sub_bybit",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if not user.subscribed_exchanges else ''}全部",
+                    callback_data="sub_all",
+                ),
+            ],
+            [
+                InlineKeyboardButton("设置金额阈值", callback_data="sub_threshold"),
+                InlineKeyboardButton("完成", callback_data="sub_done"),
+            ],
+        ])
+
+        try:
+            await query.edit_message_text(
+                f"*订阅设置*\n\n"
+                f"当前订阅的交易所: {current_exchanges}\n"
+                f"当前金额阈值: ${user.min_alert_threshold:,.0f}\n\n"
+                f"请选择要订阅的交易所或设置金额阈值:",
+                reply_markup=keyboard,
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error("Failed to update message: %s", e)
+
+    # ==================== Message Handler ====================
+
+    async def _message_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle general text messages."""
+        user_id = update.effective_user.id
+        text = update.message.text
+
+        if not await self.user_manager.is_active(user_id):
+            await update.message.reply_text(
+                "您的账号尚未激活，请等待管理员审核。"
+            )
+            return
+
+        await self.user_manager.update_activity(user_id)
+
+        # Handle threshold setting
+        if re.match(r"^\d+$", text.strip()):
+            new_threshold = float(text.strip())
+            await self.user_manager.update_subscription(
+                user_id, min_alert_threshold=new_threshold
+            )
+            await update.message.reply_text(
+                f"✅ 金额阈值已更新为 ${new_threshold:,.0f}"
+            )
+            return
+
+        text_lower = text.strip().lower()
+        if text_lower.startswith("query") or text_lower.startswith("查询"):
+            await self._query_command(update, context)
+            return
+        elif text_lower.startswith("export") or text_lower.startswith("导出"):
+            await self._export_command(update, context)
+            return
+        elif text_lower.startswith("ask") or text_lower.startswith("分析"):
+            await self._ask_command(update, context)
+            return
+        elif text_lower.startswith("buy") or text_lower.startswith("买入"):
+            await self._buy_command(update, context)
+            return
+        elif text_lower.startswith("sell") or text_lower.startswith("卖出"):
+            await self._sell_command(update, context)
+            return
+        elif text_lower.startswith("positions") or text_lower.startswith("position") or text_lower.startswith("持仓"):
+            await self._positions_command(update, context)
+            return
+        elif text_lower.startswith("balance") or text_lower.startswith("余额"):
+            await self._balance_command(update, context)
+            return
+
+        # Use dialog handler for natural language queries
+        if self.dialog_handler:
+            try:
+                user = await self.user_manager.get_user(user_id)
+                response = await self.dialog_handler.handle_message(user, text)
+                await update.message.reply_text(response, parse_mode="Markdown")
+            except Exception as e:
+                logger.error("Dialog handler error: %s", e, exc_info=True)
+                await update.message.reply_text(
+                    "处理您的请求时出现错误，请稍后重试。"
+                )
+        else:
+            await update.message.reply_text(
+                "AI 分析功能尚未配置。请联系管理员。"
+            )
