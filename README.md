@@ -152,6 +152,19 @@ cp .env.example .env
 | `DEEPSEEK_API_KEY` | DeepSeek AI 密钥 | `sk-your_deepseek_key` |
 | `TG_ENABLED` | 启用 Telegram Bot | `true` |
 
+#### 可选：Pixel Office 心跳监控
+
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `HEARTBEAT_ENABLED` | 是否启用心跳上报 | `true` |
+| `HEARTBEAT_URL` | Supabase REST upsert 地址 | `https://.../rest/v1/agents` |
+| `HEARTBEAT_API_KEY` | Supabase publishable key | `sb_publishable_xxx` |
+| `HEARTBEAT_BEARER_TOKEN` | Bearer Token，默认可与 API Key 相同 | `sb_publishable_xxx` |
+| `HEARTBEAT_AGENT_ID` | Agent 固定唯一 ID | `codex-btc-whalescope-01` |
+| `HEARTBEAT_NAME` | 大屏显示名称 | `BTC WhaleScope Agent` |
+| `HEARTBEAT_ROLE` | 角色标签 | `product` |
+| `HEARTBEAT_ROLE_LABEL_ZH` | 中文头衔 | `BTC巨鲸情报分析师` |
+
 ### 4. 启动服务
 
 ```bash

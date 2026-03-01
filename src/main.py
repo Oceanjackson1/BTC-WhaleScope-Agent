@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-import sys
 from typing import Any, Optional
 
 import uvicorn
@@ -17,6 +16,7 @@ from src.collectors.hyperliquid import HyperliquidWhaleCollector
 from src.collectors.onchain import OnchainTransferCollector
 from src.engine.aggregator import Aggregator
 from src.engine.alert_rules import AlertEngine
+from src.push.heartbeat import HeartbeatReporter
 from src.push.webhook import WebhookDispatcher
 from src.storage.database import Database
 from src.storage.user_database import UserDatabase
@@ -27,7 +27,6 @@ from src.telegram.push_dispatcher import PushDispatcher
 from src.telegram.user_manager import UserManager
 from src.telegram.dialog_handler import DialogHandler
 from src.ai.deepseek_client import DeepseekClient
-from src.ai.analyzer import AIAnalyzer
 from src.ai.analyzer import AIAnalyzer
 
 
@@ -48,6 +47,7 @@ class WhaleMonitor:
         self.user_db = UserDatabase()
         self.cg_client = CoinGlassClient()
         self.alert_engine = AlertEngine()
+        self.heartbeat = HeartbeatReporter()
         self.webhook = WebhookDispatcher()
         self.deepseek = DeepseekClient()
         self.ai_analyzer:Optional[ AIAnalyzer] = None
@@ -88,6 +88,8 @@ class WhaleMonitor:
 
         self._collectors: list[Any] = []
         self._cg_ws:Optional[ CoinGlassWSClient] = None
+        self._stopped = False
+        self._stop_task: Optional[asyncio.Task[None]] = None
 
     async def _on_alert(self, order: WhaleOrder, matched_rules: list[str], ai_analysis:Optional[ dict] = None) -> None:
         """Dispatch alert to all push channels."""
@@ -124,6 +126,9 @@ class WhaleMonitor:
                 await self.aggregator.ingest(orders)
 
     async def start(self) -> None:
+        await self.heartbeat.start()
+        await self.heartbeat.report("working", "BTC WhaleScope Agent 启动中")
+
         logger.info("=" * 60)
         logger.info("  BTC Whale Order Monitor v2.0.0")
         logger.info("  Exchanges: %s", self.settings.exchange_list)
@@ -170,45 +175,96 @@ class WhaleMonitor:
         await self._cg_ws.start()
 
         logger.info("All collectors started. System ready.")
+        await self.heartbeat.report("working", "BTC WhaleScope Agent 运行中")
 
-    async def stop(self) -> None:
+    async def stop(self, report_idle: bool = True) -> None:
+        if self._stopped:
+            return
+
+        if self._stop_task:
+            await self._stop_task
+            return
+
+        self._stop_task = asyncio.create_task(self._shutdown(report_idle))
+        await self._stop_task
+
+    async def _shutdown(self, report_idle: bool) -> None:
+        self._stopped = True
+
         logger.info("Shutting down...")
+        if report_idle:
+            await self.heartbeat.report("idle", "")
         if self._cg_ws:
-            await self._cg_ws.stop()
+            await self._shutdown_step("CoinGlass WebSocket", self._cg_ws.stop())
         for c in self._collectors:
-            await c.stop()
+            await self._shutdown_step(f"collector:{c.name}", c.stop())
 
         # Stop Telegram Bot
         if self.tg_bot:
-            await self.tg_bot.stop()
+            await self._shutdown_step("Telegram Bot", self.tg_bot.stop())
         if self.tg_push_dispatcher:
-            await self.tg_push_dispatcher.stop()
+            await self._shutdown_step("Telegram push dispatcher", self.tg_push_dispatcher.stop())
 
-        await self.webhook.stop()
-        await self.deepseek.stop()
-        await self.cg_client.stop()
-        await self.user_db.stop()
-        await self.db.stop()
+        await self._shutdown_step("Webhook dispatcher", self.webhook.stop())
+        await self._shutdown_step("Deepseek client", self.deepseek.stop())
+        await self._shutdown_step("CoinGlass REST client", self.cg_client.stop())
+        await self._shutdown_step("User database", self.user_db.stop())
+        await self._shutdown_step("Order database", self.db.stop())
         logger.info("Shutdown complete.")
+
+        await self.heartbeat.stop()
+
+    async def report_exception(self, exc: Optional[BaseException], phase: str) -> None:
+        await self.heartbeat.report_exception(exc, phase)
+
+    async def _shutdown_step(
+        self,
+        label: str,
+        operation: Any,
+        timeout: float = 5.0,
+    ) -> None:
+        try:
+            await asyncio.wait_for(operation, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Shutdown step timed out: %s", label)
+        except Exception as exc:
+            logger.error("Shutdown step failed [%s]: %s", label, exc, exc_info=True)
 
 
 async def run() -> None:
     monitor = WhaleMonitor()
+    loop = asyncio.get_running_loop()
+    should_report_idle = True
 
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(monitor.stop()))
+    def handle_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        message = context.get("message", "Unhandled event loop exception")
+        logger.error("Unhandled event loop exception: %s", message, exc_info=exc)
+        loop.create_task(monitor.report_exception(exc, f"事件循环异常: {message}"))
+        loop.default_exception_handler(context)
 
-    await monitor.start()
+    loop.set_exception_handler(handle_loop_exception)
 
-    config = uvicorn.Config(
-        app,
-        host=monitor.settings.host,
-        port=monitor.settings.port,
-        log_level=monitor.settings.log_level.lower(),
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(monitor.stop()))
+
+        await monitor.start()
+
+        config = uvicorn.Config(
+            app,
+            host=monitor.settings.host,
+            port=monitor.settings.port,
+            log_level=monitor.settings.log_level.lower(),
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+    except Exception as exc:
+        should_report_idle = False
+        await monitor.report_exception(exc, "进程异常退出")
+        raise
+    finally:
+        await monitor.stop(report_idle=should_report_idle)
 
 
 def main() -> None:

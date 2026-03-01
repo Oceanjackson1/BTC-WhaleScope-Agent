@@ -125,6 +125,10 @@ class DeepseekClient:
         self, order_data: dict[str, Any], historical_context: dict[str, Any]
     ) -> str:
         """Build prompt for order analysis."""
+        amount_usd = self._safe_number(order_data.get("amount_usd"))
+        price = self._safe_number(order_data.get("price"))
+        avg_amount = self._safe_number(historical_context.get("avg_amount"))
+
         prompt = f"""
 Analyze the following large whale order and provide a trading signal.
 
@@ -132,14 +136,14 @@ Analyze the following large whale order and provide a trading signal.
 - Exchange: {order_data.get('exchange')}
 - Symbol: {order_data.get('symbol')}
 - Side: {order_data.get('side')}
-- Amount: ${order_data.get('amount_usd', 0):,.0f}
-- Price: ${order_data.get('price', 0):,.2f}
+- Amount: ${amount_usd:,.0f}
+- Price: ${price:,.2f}
 - Order Type: {order_data.get('order_type')}
 
 **Historical Context:**
 - Large orders in last hour: {historical_context.get('history_count', 0)}
 - This direction ratio: {historical_context.get('direction_ratio', 0)}%
-- Average large order amount: ${historical_context.get('avg_amount', 0):,.0f}
+- Average large order amount: ${avg_amount:,.0f}
 
 Please provide analysis in JSON format:
 {{
@@ -172,14 +176,24 @@ Output only JSON, no other text.
 
     def _normalize_analysis(self, analysis: dict[str, Any]) -> dict[str, Any]:
         """Normalize AI analysis result."""
+        confidence = self._safe_number(analysis.get("confidence"), default=50.0)
         return {
             "analysis": analysis.get("analysis", "分析暂不可用"),
             "market_impact": analysis.get("market_impact", "影响评估中"),
             "signal": analysis.get("signal", "neutral"),
-            "confidence": min(max(analysis.get("confidence", 50), 100), 0),
+            "confidence": int(min(max(confidence, 0), 100)),
             "risk_level": analysis.get("risk_level", "medium"),
             "suggestion": analysis.get("suggestion", "建议观望"),
         }
+
+    def _safe_number(self, value: Any, default: float = 0.0) -> float:
+        """Convert nullable numeric input to a safe float for prompt formatting."""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def _default_analysis(self) -> dict[str, Any]:
         """Return default analysis when AI is unavailable."""

@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     deepseek_temperature: float = 0.7
     deepseek_api_base: str = "https://api.deepseek.com"
 
+    # Heartbeat reporting configuration
+    heartbeat_enabled: bool = False
+    heartbeat_url: str = ""
+    heartbeat_api_key: str = ""
+    heartbeat_bearer_token: str = ""
+    heartbeat_agent_id: str = "codex-btc-whalescope-01"
+    heartbeat_name: str = "BTC WhaleScope Agent"
+    heartbeat_role: str = "product"
+    heartbeat_role_label_zh: str = "BTC巨鲸情报分析师"
+
     model_config = {
         "env_file": str(PROJECT_ROOT / ".env"),
         "env_file_encoding": "utf-8",
@@ -93,6 +103,10 @@ class Settings(BaseSettings):
         if not self.tg_admin_ids:
             return []
         return [int(id.strip()) for id in self.tg_admin_ids.split(",") if id.strip().isdigit()]
+
+    @property
+    def heartbeat_token(self) -> str:
+        return self.heartbeat_bearer_token or self.heartbeat_api_key
 
 
 @lru_cache

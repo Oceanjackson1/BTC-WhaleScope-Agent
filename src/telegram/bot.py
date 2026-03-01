@@ -25,6 +25,14 @@ from config.settings import get_settings
 from src.storage.user_database import UserDatabase
 from src.telegram.user_manager import UserManager
 from src.telegram.push_dispatcher import PushDispatcher
+from src.telegram.task_progress import (
+    TaskProgressManager,
+    TaskStep,
+    ai_analysis_steps,
+    export_steps,
+    query_steps,
+    payment_job_steps,
+)
 
 if TYPE_CHECKING:
     from src.storage.user_database import UserDatabase
@@ -482,10 +490,16 @@ class TelegramBot:
             return
 
         exchange_label = exchange_filter if exchange_filter != "ALL" else ("All Exchanges" if user.language == "en" else "全部交易所")
-        status_msg = f"⏳ Querying {symbol_filter} orders from {exchange_label}..." if user.language == "en" else f"⏳ 正在查询 {exchange_label} 的 {symbol_filter} 巨鲸订单..."
-        await query.edit_message_text(status_msg)
+        msg = query.message
+        steps = export_steps()
+        title_zh = f"导出 {symbol_filter} — {exchange_label}"
+        title_en = f"Export {symbol_filter} — {exchange_label}"
+
+        # Initial placeholder (will be immediately overwritten by progress manager)
+        await query.edit_message_text("⏳")
 
         try:
+            # Query data first to check if we have results before showing progress
             if exchange_filter == "ALL":
                 sql = "SELECT * FROM whale_orders WHERE symbol LIKE ? ORDER BY timestamp DESC LIMIT 200"
                 params = (f"%{symbol_filter}%",)
@@ -498,63 +512,77 @@ class TelegramBot:
 
             if not rows:
                 no_data = f"📭 No {symbol_filter} orders found on {exchange_label}." if user.language == "en" else f"📭 {exchange_label} 上暂无 {symbol_filter} 相关订单。"
-                await query.edit_message_text(no_data)
+                await msg.edit_text(no_data)
                 return
 
             records = [dict(r) for r in rows]
             today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
             suffix = exchange_filter if exchange_filter != "ALL" else "ALL"
 
-            # --- CSV ---
-            csv_buf = io.StringIO()
-            cols = ["timestamp", "exchange", "symbol", "side", "price", "amount_usd", "quantity", "order_type", "status", "source"]
-            writer = csv.DictWriter(csv_buf, fieldnames=cols, extrasaction="ignore")
-            writer.writeheader()
-            for rec in records:
-                rc = dict(rec)
-                ts = rc.get("timestamp", 0)
-                if ts:
-                    rc["timestamp"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                writer.writerow(rc)
-            csv_bytes = csv_buf.getvalue().encode("utf-8")
-            csv_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.csv"
+            async with TaskProgressManager(msg, steps, user.language, title_zh, title_en) as progress:
+                # Step 0: Query complete, advance to CSV generation
+                await progress.advance()  # → Step 1: Generating CSV
 
-            # --- JSON ---
-            jrs = []
-            for rec in records:
-                jr = dict(rec)
-                ts = jr.get("timestamp", 0)
-                if ts:
-                    jr["timestamp_utc"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                if isinstance(jr.get("metadata"), str):
-                    try:
-                        jr["metadata"] = json.loads(jr["metadata"])
-                    except json.JSONDecodeError:
-                        pass
-                jrs.append(jr)
-            json_bytes = json.dumps(jrs, ensure_ascii=False, indent=2).encode("utf-8")
-            json_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.json"
+                # Step 1: CSV
+                csv_buf = io.StringIO()
+                cols = ["timestamp", "exchange", "symbol", "side", "price", "amount_usd", "quantity", "order_type", "status", "source"]
+                writer = csv.DictWriter(csv_buf, fieldnames=cols, extrasaction="ignore")
+                writer.writeheader()
+                for rec in records:
+                    rc = dict(rec)
+                    ts = rc.get("timestamp", 0)
+                    if ts:
+                        rc["timestamp"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    writer.writerow(rc)
+                csv_bytes = csv_buf.getvalue().encode("utf-8")
+                csv_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.csv"
 
-            if user.language == "en":
-                caption = f"📊 **{symbol_filter} Whale Orders — {exchange_label}**\n\nRecords: **{len(records)}**\nFormat: CSV + JSON"
-            else:
-                caption = f"📊 **{symbol_filter} 巨鲸订单 — {exchange_label}**\n\n记录数: **{len(records)}**\n格式: CSV + JSON"
+                await progress.advance()  # → Step 2: Generating JSON
 
-            await query.edit_message_text(
-                f"✅ {len(records)} records found. Sending..." if user.language == "en" else f"✅ 找到 {len(records)} 条记录，发送中..."
-            )
+                # Step 2: JSON
+                jrs = []
+                for rec in records:
+                    jr = dict(rec)
+                    ts = jr.get("timestamp", 0)
+                    if ts:
+                        jr["timestamp_utc"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if isinstance(jr.get("metadata"), str):
+                        try:
+                            jr["metadata"] = json.loads(jr["metadata"])
+                        except json.JSONDecodeError:
+                            pass
+                    jrs.append(jr)
+                json_bytes = json.dumps(jrs, ensure_ascii=False, indent=2).encode("utf-8")
+                json_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.json"
 
-            chat_id = query.message.chat_id
-            await query.message.reply_document(
-                document=io.BytesIO(csv_bytes), filename=csv_fn, caption=caption, parse_mode="Markdown"
-            )
-            await query.message.reply_document(
-                document=io.BytesIO(json_bytes), filename=json_fn
-            )
+                await progress.advance()  # → Step 3: Sending files
+
+                # Step 3: Send files
+                if user.language == "en":
+                    caption = f"📊 **{symbol_filter} Whale Orders — {exchange_label}**\n\nRecords: **{len(records)}**\nFormat: CSV + JSON"
+                else:
+                    caption = f"📊 **{symbol_filter} 巨鲸订单 — {exchange_label}**\n\n记录数: **{len(records)}**\n格式: CSV + JSON"
+
+                await msg.reply_document(
+                    document=io.BytesIO(csv_bytes), filename=csv_fn, caption=caption, parse_mode="Markdown"
+                )
+                await msg.reply_document(
+                    document=io.BytesIO(json_bytes), filename=json_fn
+                )
+
+            # Overwrite with final summary
+            done_msg = f"✅ {len(records)} records exported." if user.language == "en" else f"✅ 已导出 {len(records)} 条记录。"
+            try:
+                await msg.edit_text(done_msg)
+            except Exception:
+                pass
 
         except Exception as e:
             logger.error("Export failed: %s", e, exc_info=True)
-            await query.edit_message_text(f"❌ Export failed: {e}" if user.language == "en" else f"❌ 导出失败: {e}")
+            try:
+                await msg.edit_text(f"❌ Export failed: {e}" if user.language == "en" else f"❌ 导出失败: {e}")
+            except Exception:
+                await msg.reply_text(f"❌ Export failed: {e}" if user.language == "en" else f"❌ 导出失败: {e}")
 
     async def _ask_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /ask command — real Deepseek AI analysis with chat memory."""
@@ -589,73 +617,86 @@ class TelegramBot:
             await update.message.reply_text("❌ AI client not configured." if user.language == "en" else "❌ AI 分析服务未配置。")
             return
 
-        thinking_msg = "🧠 Analyzing with AI..." if user.language == "en" else "🧠 AI 正在分析中..."
-        progress = await update.message.reply_text(thinking_msg)
+        steps = ai_analysis_steps()
+        progress_msg = await update.message.reply_text("⏳")
 
         try:
-            # 1. Save user's question to chat history
-            await self.user_db.add_chat_message(user_id, "user", question)
+            async with TaskProgressManager(
+                progress_msg, steps, user.language, "AI 分析", "AI Analysis"
+            ) as progress:
+                # Step 0: Save question + load chat history
+                await self.user_db.add_chat_message(user_id, "user", question)
 
-            # 2. Load recent chat history for multi-turn memory
-            chat_history = None
+                chat_history = None
+                try:
+                    history_msgs = await self.user_db.get_chat_history(user_id, limit=6)
+                    if history_msgs:
+                        chat_history = [
+                            {"role": m.role, "content": m.content}
+                            for m in history_msgs
+                            if m.content != question
+                        ]
+                except Exception as e:
+                    logger.warning("Failed to load chat history: %s", e)
+
+                await progress.advance()  # → Step 1: Fetching whale data
+
+                # Step 1: Fetch recent whale data from DB
+                data_context = {}
+                if self.db and hasattr(self.db, '_conn') and self.db._conn:
+                    async with self.db._conn.execute(
+                        "SELECT COUNT(*) as cnt, AVG(amount_usd) as avg_amt FROM whale_orders WHERE timestamp > ?",
+                        (int((datetime.now(timezone.utc).timestamp() - 3600) * 1000),)
+                    ) as cur:
+                        row = await cur.fetchone()
+                        data_context["orders_last_1h"] = row["cnt"] if row else 0
+                        data_context["avg_amount_1h"] = round(row["avg_amt"] or 0, 2) if row else 0
+
+                    async with self.db._conn.execute(
+                        """SELECT side, COUNT(*) as cnt, SUM(amount_usd) as total
+                           FROM whale_orders WHERE timestamp > ?
+                           GROUP BY side""",
+                        (int((datetime.now(timezone.utc).timestamp() - 3600) * 1000),)
+                    ) as cur:
+                        sides = await cur.fetchall()
+                        for s in sides:
+                            data_context[f"{s['side']}_count"] = s["cnt"]
+                            data_context[f"{s['side']}_total_usd"] = round(s["total"] or 0, 2)
+
+                    async with self.db._conn.execute(
+                        "SELECT * FROM whale_orders ORDER BY timestamp DESC LIMIT 5"
+                    ) as cur:
+                        recent = await cur.fetchall()
+                        recent_summary = []
+                        for r in recent:
+                            d = dict(r)
+                            recent_summary.append({
+                                "exchange": d["exchange"], "symbol": d["symbol"],
+                                "side": d["side"], "amount_usd": d["amount_usd"],
+                                "price": d["price"], "order_type": d["order_type"]
+                            })
+                        data_context["recent_5_orders"] = recent_summary
+
+                await progress.advance()  # → Step 2: AI analyzing
+
+                # Step 2: Call Deepseek AI (longest step, auto-pulse animates)
+                response = await self.ai_client.answer_query(question, data_context, chat_history=chat_history)
+                await self.user_db.add_chat_message(user_id, "assistant", response)
+
+                await progress.advance()  # → Step 3: Formatting results
+
+            # Context manager exits with "completed" — overwrite with final result
             try:
-                history_msgs = await self.user_db.get_chat_history(user_id, limit=6)
-                if history_msgs:
-                    chat_history = [
-                        {"role": m.role, "content": m.content}
-                        for m in history_msgs
-                        if m.content != question  # exclude current question (will be added by answer_query)
-                    ]
-            except Exception as e:
-                logger.warning("Failed to load chat history: %s", e)
-
-            # 3. Fetch recent whale data from DB for context
-            data_context = {}
-            if self.db and hasattr(self.db, '_conn') and self.db._conn:
-                async with self.db._conn.execute(
-                    "SELECT COUNT(*) as cnt, AVG(amount_usd) as avg_amt FROM whale_orders WHERE timestamp > ?",
-                    (int((datetime.now(timezone.utc).timestamp() - 3600) * 1000),)
-                ) as cur:
-                    row = await cur.fetchone()
-                    data_context["orders_last_1h"] = row["cnt"] if row else 0
-                    data_context["avg_amount_1h"] = round(row["avg_amt"] or 0, 2) if row else 0
-
-                async with self.db._conn.execute(
-                    """SELECT side, COUNT(*) as cnt, SUM(amount_usd) as total
-                       FROM whale_orders WHERE timestamp > ?
-                       GROUP BY side""",
-                    (int((datetime.now(timezone.utc).timestamp() - 3600) * 1000),)
-                ) as cur:
-                    sides = await cur.fetchall()
-                    for s in sides:
-                        data_context[f"{s['side']}_count"] = s["cnt"]
-                        data_context[f"{s['side']}_total_usd"] = round(s["total"] or 0, 2)
-
-                async with self.db._conn.execute(
-                    "SELECT * FROM whale_orders ORDER BY timestamp DESC LIMIT 5"
-                ) as cur:
-                    recent = await cur.fetchall()
-                    recent_summary = []
-                    for r in recent:
-                        d = dict(r)
-                        recent_summary.append({
-                            "exchange": d["exchange"], "symbol": d["symbol"],
-                            "side": d["side"], "amount_usd": d["amount_usd"],
-                            "price": d["price"], "order_type": d["order_type"]
-                        })
-                    data_context["recent_5_orders"] = recent_summary
-
-            # 4. Call Deepseek AI with chat history
-            response = await self.ai_client.answer_query(question, data_context, chat_history=chat_history)
-
-            # 5. Save AI response to chat history
-            await self.user_db.add_chat_message(user_id, "assistant", response)
-
-            await progress.edit_text(f"🤖 **AI Analysis**\n\n{response}", parse_mode="Markdown")
+                await progress_msg.edit_text(f"🤖 **AI Analysis**\n\n{response}", parse_mode="Markdown")
+            except Exception:
+                await update.message.reply_text(f"🤖 **AI Analysis**\n\n{response}", parse_mode="Markdown")
 
         except Exception as e:
             logger.error("AI ask failed: %s", e, exc_info=True)
-            await progress.edit_text(f"❌ AI analysis failed: {e}" if user.language == "en" else f"❌ AI 分析失败: {e}")
+            try:
+                await progress_msg.edit_text(f"❌ AI analysis failed: {e}" if user.language == "en" else f"❌ AI 分析失败: {e}")
+            except Exception:
+                await update.message.reply_text(f"❌ AI analysis failed: {e}" if user.language == "en" else f"❌ AI 分析失败: {e}")
 
     async def _buy_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._execute_dummy_job(update, "buy", "Copy Buy", "跟单买入", 1.00)
@@ -803,20 +844,40 @@ class TelegramBot:
             if data in job_types:
                 names = job_types[data]
                 job_name = names[0] if user.language == "en" else names[1]
-                
-                if user.language == "en":
-                    msg = (
-                        f"✅ **Payment Successful!**\n\n"
-                        f"Funds received! I am now executing **{job_name}** for you...\n"
-                        f"(This feature is for demonstration, no real funds were moved)"
-                    )
-                else:
-                    msg = (
-                        f"✅ **支付成功！**\n\n"
-                        f"我已经收到了您的付款，正在为您执行 **{job_name}** 任务...\n"
-                        f"（此功能为演示效果，未实际扣取您的资金）"
-                    )
-                await query.edit_message_text(msg, parse_mode="Markdown")
+
+                await query.edit_message_text("⏳")
+                pay_msg = query.message
+                steps = payment_job_steps()
+
+                try:
+                    async with TaskProgressManager(
+                        pay_msg, steps, user.language, job_name, job_name
+                    ) as progress:
+                        # Step 0: Processing payment (simulated)
+                        await asyncio.sleep(1)
+                        await progress.advance()  # → Step 1: Executing task
+
+                        # Step 1: Executing task (simulated)
+                        await asyncio.sleep(2)
+                        await progress.advance()  # → Step 2: Confirming result
+
+                        # Step 2: auto-completes on exit
+
+                    if user.language == "en":
+                        done = (
+                            f"✅ **Payment Successful!**\n\n"
+                            f"**{job_name}** completed.\n"
+                            f"(This feature is for demonstration, no real funds were moved)"
+                        )
+                    else:
+                        done = (
+                            f"✅ **支付成功！**\n\n"
+                            f"**{job_name}** 任务已完成。\n"
+                            f"（此功能为演示效果，未实际扣取您的资金）"
+                        )
+                    await pay_msg.edit_text(done, parse_mode="Markdown")
+                except Exception as e:
+                    logger.error("Payment job failed: %s", e, exc_info=True)
             return
 
         elif data == "sub_all":
@@ -961,15 +1022,27 @@ class TelegramBot:
 
         # Use dialog handler for natural language queries
         if self.dialog_handler:
+            user = await self.user_manager.get_user(user_id)
+            steps = query_steps()
+            progress_msg = await update.message.reply_text("⏳")
             try:
-                user = await self.user_manager.get_user(user_id)
-                response = await self.dialog_handler.handle_message(user, text)
-                await update.message.reply_text(response, parse_mode="Markdown")
+                async with TaskProgressManager(
+                    progress_msg, steps, user.language if user else "zh",
+                    "智能分析", "Smart Analysis",
+                ) as progress:
+                    response = await self.dialog_handler.handle_message(user, text)
+
+                try:
+                    await progress_msg.edit_text(response, parse_mode="Markdown")
+                except Exception:
+                    await update.message.reply_text(response, parse_mode="Markdown")
             except Exception as e:
                 logger.error("Dialog handler error: %s", e, exc_info=True)
-                await update.message.reply_text(
-                    "处理您的请求时出现错误，请稍后重试。"
-                )
+                try:
+                    err = "An error occurred. Please try again." if (user and user.language == "en") else "处理您的请求时出现错误，请稍后重试。"
+                    await progress_msg.edit_text(err)
+                except Exception:
+                    await update.message.reply_text("处理您的请求时出现错误，请稍后重试。")
         else:
             await update.message.reply_text(
                 "AI 分析功能尚未配置。请联系管理员。"
