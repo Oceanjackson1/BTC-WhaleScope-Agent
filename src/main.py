@@ -37,6 +37,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("whale_monitor")
 
+# Suppress request-level client logs that can expose credential-bearing URLs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 class WhaleMonitor:
     """Orchestrates all components of the whale order monitoring system."""
@@ -136,6 +140,10 @@ class WhaleMonitor:
         logger.info("  Liquidation threshold: $%s", f"{self.settings.liquidation_threshold:,.0f}")
         logger.info("  Telegram Bot: %s", "enabled" if self.settings.tg_enabled else "disabled")
         logger.info("  Deepseek AI: %s", "enabled" if self.settings.deepseek_api_key else "disabled")
+        logger.info("  Agent ID: %s", self.settings.agent_id)
+        logger.info("  Agent Name: %s", self.settings.agent_name)
+        logger.info("  Bot Username: %s", self.settings.bot_username or "unknown")
+        logger.info("  App Version: %s", self.settings.app_version)
         logger.info("=" * 60)
 
         # Start databases

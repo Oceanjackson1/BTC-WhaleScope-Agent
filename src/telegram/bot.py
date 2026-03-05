@@ -431,8 +431,357 @@ class TelegramBot:
             )
         await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
 
+    def _parse_query_request(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> dict[str, str]:
+        """Parse query mode and symbol from command args/text."""
+        mode_alias = {
+            "large": "large",
+            "onchain": "onchain",
+            "spot": "spot",
+            "futures": "futures",
+            "大单": "large",
+            "链上": "onchain",
+            "现货": "spot",
+            "合约": "futures",
+            "期货": "futures",
+        }
+
+        tokens: list[str] = []
+        if context.args:
+            tokens = [t.strip() for t in context.args if t.strip()]
+        elif update.message and update.message.text:
+            parts = update.message.text.strip().split()
+            if parts:
+                head = parts[0].lower()
+                if head in {"/query", "query", "查询"}:
+                    tokens = parts[1:]
+                else:
+                    tokens = parts
+
+        mode = "large"
+        symbol = "BTC"
+        if tokens:
+            first = tokens[0]
+            normalized_mode = mode_alias.get(first.lower()) or mode_alias.get(first)
+            if normalized_mode:
+                mode = normalized_mode
+                if len(tokens) > 1:
+                    symbol = tokens[1]
+            else:
+                symbol = first
+                if len(tokens) > 1:
+                    maybe_mode = mode_alias.get(tokens[1].lower()) or mode_alias.get(tokens[1])
+                    if maybe_mode:
+                        mode = maybe_mode
+
+        symbol = re.sub(r"[^A-Za-z0-9_-]", "", symbol.upper()) or "BTC"
+        return {"mode": mode, "symbol": symbol}
+
+    def _query_meta(self, mode: str, language: str) -> tuple[str, float]:
+        """Get display name and price for query mode."""
+        mode_name_en = {
+            "large": "Whale Large Orders",
+            "onchain": "On-chain Transfers",
+            "spot": "Spot Order Flow",
+            "futures": "Futures Order Flow",
+        }
+        mode_name_zh = {
+            "large": "巨鲸大单",
+            "onchain": "链上异动",
+            "spot": "现货追踪",
+            "futures": "合约追踪",
+        }
+        price_map = {
+            "large": 0.10,
+            "onchain": 0.10,
+            "spot": 0.20,
+            "futures": 0.20,
+        }
+        name = mode_name_en.get(mode, mode_name_en["large"]) if language == "en" else mode_name_zh.get(mode, mode_name_zh["large"])
+        return name, price_map.get(mode, 0.20)
+
+    async def _do_query(
+        self,
+        msg,
+        user,
+        query_request: dict[str, str],
+    ) -> None:
+        """Run a real query against whale_orders and render summary rows."""
+        if not self.db or not hasattr(self.db, "_conn") or self.db._conn is None:
+            err = "❌ Database not available." if user.language == "en" else "❌ 数据库尚未就绪，请稍后再试。"
+            await msg.edit_text(err)
+            return
+
+        mode = query_request.get("mode", "large")
+        symbol = query_request.get("symbol", "BTC")
+
+        mode_name, _ = self._query_meta(mode, user.language)
+        title_zh = f"数据查询：{mode_name} {symbol}"
+        title_en = f"Data Query: {mode_name} {symbol}"
+        steps = query_steps()
+
+        filters = ["symbol LIKE ?"]
+        params: list[object] = [f"%{symbol}%"]
+
+        if mode == "onchain":
+            filters.append("source = ?")
+            params.append("onchain")
+        elif mode == "spot":
+            filters.append("source = ?")
+            params.append("cex_spot")
+        elif mode == "futures":
+            filters.append("(source = ? OR source = ?)")
+            params.extend(["cex_futures", "dex_hyperliquid"])
+        else:
+            filters.append("(order_type = ? OR order_type = ?)")
+            params.extend(["large_limit", "whale_position"])
+
+        where_clause = " AND ".join(filters)
+        breakdown_rows = []
+
+        async with TaskProgressManager(msg, steps, user.language, title_zh, title_en) as progress:
+            await progress.advance()  # Querying data
+
+            sql = (
+                "SELECT timestamp, exchange, symbol, side, amount_usd, price, source, order_type, metadata "
+                f"FROM whale_orders WHERE {where_clause} "
+                "ORDER BY timestamp DESC LIMIT 20"
+            )
+            async with self.db._conn.execute(sql, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+
+            stat_sql = (
+                "SELECT COUNT(*) as cnt, COALESCE(SUM(amount_usd), 0) as total_usd, "
+                "COALESCE(SUM(CASE WHEN side='buy' THEN amount_usd ELSE 0 END), 0) as buy_usd, "
+                "COALESCE(SUM(CASE WHEN side='sell' THEN amount_usd ELSE 0 END), 0) as sell_usd "
+                f"FROM whale_orders WHERE {where_clause}"
+            )
+            async with self.db._conn.execute(stat_sql, tuple(params)) as cursor:
+                stat = await cursor.fetchone()
+
+            if mode == "large":
+                breakdown_sql = (
+                    "SELECT source, order_type, COUNT(*) as cnt, COALESCE(SUM(amount_usd), 0) as total_usd "
+                    f"FROM whale_orders WHERE {where_clause} "
+                    "GROUP BY source, order_type "
+                    "ORDER BY total_usd DESC"
+                )
+                async with self.db._conn.execute(breakdown_sql, tuple(params)) as cursor:
+                    breakdown_rows = await cursor.fetchall()
+
+            await progress.advance()  # Generating answer
+
+        total_count = int(stat["cnt"]) if stat else 0
+        total_usd = float(stat["total_usd"]) if stat else 0.0
+        buy_usd = float(stat["buy_usd"]) if stat else 0.0
+        sell_usd = float(stat["sell_usd"]) if stat else 0.0
+
+        def parse_meta(raw_meta) -> dict:
+            if isinstance(raw_meta, dict):
+                return raw_meta
+            if isinstance(raw_meta, str):
+                try:
+                    parsed = json.loads(raw_meta)
+                    return parsed if isinstance(parsed, dict) else {}
+                except json.JSONDecodeError:
+                    return {}
+            return {}
+
+        if not rows:
+            # If on-chain/spot data is empty, fallback to recent whale events for same symbol.
+            if mode in {"onchain", "spot"}:
+                fallback_params: tuple[object, ...] = (f"%{symbol}%",)
+                fallback_sql = (
+                    "SELECT timestamp, exchange, symbol, side, amount_usd, price, source, order_type, metadata "
+                    "FROM whale_orders WHERE symbol LIKE ? "
+                    "ORDER BY timestamp DESC LIMIT 8"
+                )
+                async with self.db._conn.execute(fallback_sql, fallback_params) as cursor:
+                    fallback_rows = await cursor.fetchall()
+
+                if fallback_rows:
+                    fallback_stat_sql = (
+                        "SELECT COUNT(*) as cnt, COALESCE(SUM(amount_usd), 0) as total_usd, "
+                        "COALESCE(SUM(CASE WHEN side='buy' THEN amount_usd ELSE 0 END), 0) as buy_usd, "
+                        "COALESCE(SUM(CASE WHEN side='sell' THEN amount_usd ELSE 0 END), 0) as sell_usd "
+                        "FROM whale_orders WHERE symbol LIKE ?"
+                    )
+                    async with self.db._conn.execute(fallback_stat_sql, fallback_params) as cursor:
+                        fallback_stat = await cursor.fetchone()
+
+                    fallback_count = int(fallback_stat["cnt"]) if fallback_stat else 0
+                    fallback_total = float(fallback_stat["total_usd"]) if fallback_stat else 0.0
+                    fallback_buy = float(fallback_stat["buy_usd"]) if fallback_stat else 0.0
+                    fallback_sell = float(fallback_stat["sell_usd"]) if fallback_stat else 0.0
+
+                    fallback_lines = []
+                    for row in fallback_rows:
+                        ts = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=timezone.utc).strftime("%H:%M:%S")
+                        side = str(row["side"]).upper()
+                        src = str(row["source"])
+                        line = (
+                            f"{ts} | {row['exchange']} {row['symbol']} {side} ${float(row['amount_usd']):,.0f} [{src}]"
+                        )
+                        meta = parse_meta(row["metadata"])
+                        wallet = str(meta.get("wallet") or "").strip()
+                        if wallet:
+                            line += f" | wallet:{wallet}"
+                        fallback_lines.append(line)
+
+                    if mode == "spot":
+                        fallback_hint_en = "Spot order-book data is unavailable with current CoinGlass plan."
+                        fallback_hint_zh = "当前 CoinGlass 套餐下现货盘口大单数据不可用。"
+                    else:
+                        fallback_hint_en = "No on-chain transfer records found for now."
+                        fallback_hint_zh = "当前未采集到链上转账记录。"
+
+                    if user.language == "en":
+                        fallback_result = (
+                            "✅ Payment successful!\n"
+                            f"📭 {fallback_hint_en}\n"
+                            "🔁 Showing latest whale events for the same symbol instead.\n"
+                            f"• Total records: {fallback_count}\n"
+                            f"• Total volume: ${fallback_total:,.0f}\n"
+                            f"• Buy volume: ${fallback_buy:,.0f}\n"
+                            f"• Sell volume: ${fallback_sell:,.0f}\n\n"
+                            "Latest fallback events (UTC):\n"
+                            + "\n".join(fallback_lines)
+                        )
+                    else:
+                        fallback_result = (
+                            "✅ 支付成功！\n"
+                            f"📭 {fallback_hint_zh}\n"
+                            "🔁 已自动回退为同币种最近巨鲸事件。\n"
+                            f"• 总记录数：{fallback_count}\n"
+                            f"• 总成交额：${fallback_total:,.0f}\n"
+                            f"• 买入额：${fallback_buy:,.0f}\n"
+                            f"• 卖出额：${fallback_sell:,.0f}\n\n"
+                            "回退事件（UTC）：\n"
+                            + "\n".join(fallback_lines)
+                        )
+                    await msg.edit_text(fallback_result)
+                    return
+
+            if user.language == "en":
+                no_data = (
+                    "✅ Payment successful!\n"
+                    f"📭 No data found for mode={mode}, symbol={symbol}.\n"
+                    "Possible reasons:\n"
+                    "1) Collector has not accumulated data yet\n"
+                    "2) API plan limitation (especially spot/futures)\n"
+                    "3) Symbol has no recent whale events\n"
+                    "Tip: try /query large BTC first."
+                )
+            else:
+                no_data = (
+                    "✅ 支付成功！\n"
+                    f"📭 当前没有匹配数据（类型={mode}，币种={symbol}）。\n"
+                    "可能原因：\n"
+                    "1) 采集器刚启动，数据尚未积累\n"
+                    "2) API 套餐限制（尤其 spot/futures）\n"
+                    "3) 该币种近期无巨鲸事件\n"
+                    "建议先试：/query large BTC。"
+                )
+            await msg.edit_text(no_data)
+            return
+
+        latest_lines = []
+        for row in rows[:8]:
+            ts = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=timezone.utc).strftime("%H:%M:%S")
+            side = str(row["side"]).upper()
+            line = f"{ts} | {row['exchange']} {row['symbol']} {side} ${float(row['amount_usd']):,.0f}"
+            if mode == "large":
+                meta = parse_meta(row["metadata"])
+                wallet = str(meta.get("wallet") or "").strip()
+                action = str(meta.get("action") or "").strip()
+                if wallet:
+                    action_suffix = f" ({action})" if action else ""
+                    line += f" | wallet:{wallet}{action_suffix}"
+            latest_lines.append(line)
+
+        breakdown_lines = []
+        if mode == "large":
+            for item in breakdown_rows[:6]:
+                breakdown_lines.append(
+                    f"- {item['source']} / {item['order_type']}: {int(item['cnt'])} records, ${float(item['total_usd']):,.0f}"
+                )
+
+        if user.language == "en":
+            result = (
+                "✅ Payment successful!\n"
+                f"📊 Query done: {mode_name} ({symbol})\n"
+                f"• Total records: {total_count}\n"
+                f"• Total volume: ${total_usd:,.0f}\n"
+                f"• Buy volume: ${buy_usd:,.0f}\n"
+                f"• Sell volume: ${sell_usd:,.0f}\n"
+            )
+            if breakdown_lines:
+                result += "\nSource breakdown:\n" + "\n".join(breakdown_lines)
+            result += (
+                "\n\n"
+                "Latest events (UTC):\n"
+                + "\n".join(latest_lines)
+            )
+        else:
+            result = (
+                "✅ 支付成功！\n"
+                f"📊 查询完成：{mode_name}（{symbol}）\n"
+                f"• 总记录数：{total_count}\n"
+                f"• 总成交额：${total_usd:,.0f}\n"
+                f"• 买入额：${buy_usd:,.0f}\n"
+                f"• 卖出额：${sell_usd:,.0f}\n"
+            )
+            if breakdown_lines:
+                result += "\n来源明细：\n" + "\n".join(breakdown_lines)
+            result += (
+                "\n\n"
+                "最新事件（UTC）：\n"
+                + "\n".join(latest_lines)
+            )
+        await msg.edit_text(result)
+
     async def _query_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._execute_dummy_job(update, "query", "Data Query", "数据查询", 0.20)
+        user_id = update.effective_user.id
+        user = await self.user_manager.get_user(user_id)
+        if not user:
+            return
+
+        if not user.is_active:
+            msg = "⚠️ Please input invite code (e.g. `/start Ocean1`) first." if user.language == "en" else "⚠️ 请先输入验证码激活（例如：`/start Ocean1`）"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            return
+
+        query_request = self._parse_query_request(update, context)
+        mode = query_request["mode"]
+        symbol = query_request["symbol"]
+        mode_name, price = self._query_meta(mode, user.language)
+        context.user_data["pending_query_request"] = query_request
+
+        btn_text = f"💳 Pay ${price:.2f}" if user.language == "en" else f"💳 确认支付 ${price:.2f}"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(btn_text, callback_data="pay_job_query")]
+        ])
+
+        if user.language == "en":
+            msg = (
+                "🧾 **Virtual Invoice**\n\n"
+                f"Target Job: **📊 {mode_name}**\n"
+                f"Symbol: **{symbol}**\n"
+                f"Total Cost: **${price:.2f}**\n\n"
+                "Please click the button below to execute the query:"
+            )
+        else:
+            msg = (
+                "🧾 **虚拟账单**\n\n"
+                f"您选择了服务：**📊 {mode_name}**\n"
+                f"查询币种：**{symbol}**\n"
+                f"服务费用：**${price:.2f}**\n\n"
+                "请点击下方按钮完成支付并开始查询："
+            )
+        await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
 
     async def _export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /export command — show exchange picker before exporting."""
@@ -454,35 +803,53 @@ class TelegramBot:
             parts = update.message.text.strip().split()
             if len(parts) > 1:
                 symbol_filter = parts[1].upper()
+        symbol_filter = re.sub(r"[^A-Za-z0-9_-]", "", symbol_filter) or "BTC"
 
         # Show exchange picker
         if user.language == "en":
-            msg = f"📥 **Export {symbol_filter} Whale Orders**\n\nPlease select the exchange to export from:"
+            msg = f"📥 **Export {symbol_filter} Whale Orders**\n\nStep 1/2: Please select the exchange:"
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_do_{symbol_filter}_Hyperliquid"),
-                    InlineKeyboardButton("Binance", callback_data=f"export_do_{symbol_filter}_Binance"),
+                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_pick_{symbol_filter}_Hyperliquid"),
+                    InlineKeyboardButton("Binance", callback_data=f"export_pick_{symbol_filter}_Binance"),
                 ],
                 [
-                    InlineKeyboardButton("OKX", callback_data=f"export_do_{symbol_filter}_OKX"),
-                    InlineKeyboardButton("🌐 All Exchanges", callback_data=f"export_do_{symbol_filter}_ALL"),
+                    InlineKeyboardButton("OKX", callback_data=f"export_pick_{symbol_filter}_OKX"),
+                    InlineKeyboardButton("🌐 All Exchanges", callback_data=f"export_pick_{symbol_filter}_ALL"),
                 ]
             ])
         else:
-            msg = f"📥 **导出 {symbol_filter} 巨鲸订单**\n\n请选择您想导出的交易所："
+            msg = f"📥 **导出 {symbol_filter} 巨鲸订单**\n\n步骤 1/2：请选择交易所："
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_do_{symbol_filter}_Hyperliquid"),
-                    InlineKeyboardButton("Binance", callback_data=f"export_do_{symbol_filter}_Binance"),
+                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_pick_{symbol_filter}_Hyperliquid"),
+                    InlineKeyboardButton("Binance", callback_data=f"export_pick_{symbol_filter}_Binance"),
                 ],
                 [
-                    InlineKeyboardButton("OKX", callback_data=f"export_do_{symbol_filter}_OKX"),
-                    InlineKeyboardButton("🌐 全部交易所", callback_data=f"export_do_{symbol_filter}_ALL"),
+                    InlineKeyboardButton("OKX", callback_data=f"export_pick_{symbol_filter}_OKX"),
+                    InlineKeyboardButton("🌐 全部交易所", callback_data=f"export_pick_{symbol_filter}_ALL"),
                 ]
             ])
         await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
 
-    async def _do_export(self, query, user, symbol_filter: str, exchange_filter: str) -> None:
+    def _export_range_meta(self, range_key: str, language: str) -> tuple[str, int]:
+        """Get export range label and day span."""
+        mapping = {
+            "1d": ("1 Day", "1天", 1),
+            "7d": ("7 Days", "7天", 7),
+            "30d": ("1 Month", "1个月", 30),
+        }
+        en_label, zh_label, days = mapping.get(range_key, mapping["7d"])
+        return (en_label if language == "en" else zh_label, days)
+
+    async def _do_export(
+        self,
+        query,
+        user,
+        symbol_filter: str,
+        exchange_filter: str,
+        range_key: str = "7d",
+    ) -> None:
         """Actually perform the CSV+JSON export after exchange selection."""
         if not self.db or not hasattr(self.db, '_conn') or self.db._conn is None:
             msg = "❌ Database not available." if user.language == "en" else "❌ 数据库尚未就绪，请稍后重试。"
@@ -490,10 +857,14 @@ class TelegramBot:
             return
 
         exchange_label = exchange_filter if exchange_filter != "ALL" else ("All Exchanges" if user.language == "en" else "全部交易所")
+        range_label, days = self._export_range_meta(range_key, user.language)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        since_ms = now_ms - days * 24 * 60 * 60 * 1000
+
         msg = query.message
         steps = export_steps()
-        title_zh = f"导出 {symbol_filter} — {exchange_label}"
-        title_en = f"Export {symbol_filter} — {exchange_label}"
+        title_zh = f"导出 {symbol_filter} — {exchange_label} — {range_label}"
+        title_en = f"Export {symbol_filter} — {exchange_label} — {range_label}"
 
         # Initial placeholder (will be immediately overwritten by progress manager)
         await query.edit_message_text("⏳")
@@ -501,23 +872,35 @@ class TelegramBot:
         try:
             # Query data first to check if we have results before showing progress
             if exchange_filter == "ALL":
-                sql = "SELECT * FROM whale_orders WHERE symbol LIKE ? ORDER BY timestamp DESC LIMIT 200"
-                params = (f"%{symbol_filter}%",)
+                sql = (
+                    "SELECT * FROM whale_orders "
+                    "WHERE symbol LIKE ? AND timestamp >= ? "
+                    "ORDER BY timestamp DESC LIMIT 3000"
+                )
+                params = (f"%{symbol_filter}%", since_ms)
             else:
-                sql = "SELECT * FROM whale_orders WHERE symbol LIKE ? AND exchange = ? ORDER BY timestamp DESC LIMIT 200"
-                params = (f"%{symbol_filter}%", exchange_filter)
+                sql = (
+                    "SELECT * FROM whale_orders "
+                    "WHERE symbol LIKE ? AND exchange = ? AND timestamp >= ? "
+                    "ORDER BY timestamp DESC LIMIT 3000"
+                )
+                params = (f"%{symbol_filter}%", exchange_filter, since_ms)
 
             async with self.db._conn.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
 
             if not rows:
-                no_data = f"📭 No {symbol_filter} orders found on {exchange_label}." if user.language == "en" else f"📭 {exchange_label} 上暂无 {symbol_filter} 相关订单。"
+                if user.language == "en":
+                    no_data = f"📭 No {symbol_filter} orders found on {exchange_label} in the last {range_label}."
+                else:
+                    no_data = f"📭 最近{range_label}内，{exchange_label} 上暂无 {symbol_filter} 相关订单。"
                 await msg.edit_text(no_data)
                 return
 
             records = [dict(r) for r in rows]
             today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
             suffix = exchange_filter if exchange_filter != "ALL" else "ALL"
+            range_suffix = range_key
 
             async with TaskProgressManager(msg, steps, user.language, title_zh, title_en) as progress:
                 # Step 0: Query complete, advance to CSV generation
@@ -535,7 +918,7 @@ class TelegramBot:
                         rc["timestamp"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     writer.writerow(rc)
                 csv_bytes = csv_buf.getvalue().encode("utf-8")
-                csv_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.csv"
+                csv_fn = f"whale_orders_{symbol_filter}_{suffix}_{range_suffix}_{today_str}.csv"
 
                 await progress.advance()  # → Step 2: Generating JSON
 
@@ -553,15 +936,25 @@ class TelegramBot:
                             pass
                     jrs.append(jr)
                 json_bytes = json.dumps(jrs, ensure_ascii=False, indent=2).encode("utf-8")
-                json_fn = f"whale_orders_{symbol_filter}_{suffix}_{today_str}.json"
+                json_fn = f"whale_orders_{symbol_filter}_{suffix}_{range_suffix}_{today_str}.json"
 
                 await progress.advance()  # → Step 3: Sending files
 
                 # Step 3: Send files
                 if user.language == "en":
-                    caption = f"📊 **{symbol_filter} Whale Orders — {exchange_label}**\n\nRecords: **{len(records)}**\nFormat: CSV + JSON"
+                    caption = (
+                        f"📊 **{symbol_filter} Whale Orders — {exchange_label}**\n\n"
+                        f"Range: **{range_label}**\n"
+                        f"Records: **{len(records)}**\n"
+                        "Format: CSV + JSON"
+                    )
                 else:
-                    caption = f"📊 **{symbol_filter} 巨鲸订单 — {exchange_label}**\n\n记录数: **{len(records)}**\n格式: CSV + JSON"
+                    caption = (
+                        f"📊 **{symbol_filter} 巨鲸订单 — {exchange_label}**\n\n"
+                        f"时间范围: **{range_label}**\n"
+                        f"记录数: **{len(records)}**\n"
+                        "格式: CSV + JSON"
+                    )
 
                 await msg.reply_document(
                     document=io.BytesIO(csv_bytes), filename=csv_fn, caption=caption, parse_mode="Markdown"
@@ -571,7 +964,11 @@ class TelegramBot:
                 )
 
             # Overwrite with final summary
-            done_msg = f"✅ {len(records)} records exported." if user.language == "en" else f"✅ 已导出 {len(records)} 条记录。"
+            done_msg = (
+                f"✅ {len(records)} records exported ({range_label})."
+                if user.language == "en"
+                else f"✅ 已导出 {len(records)} 条记录（{range_label}）。"
+            )
             try:
                 await msg.edit_text(done_msg)
             except Exception:
@@ -814,13 +1211,41 @@ class TelegramBot:
             await query.edit_message_text(msg)
             return
 
-        # Export exchange selection callback: export_do_{SYMBOL}_{EXCHANGE}
-        if data.startswith("export_do_"):
-            parts = data.split("_", 3)  # ['export', 'do', 'BTC', 'Hyperliquid']
+        # Export flow step 1: exchange selection callback: export_pick_{SYMBOL}_{EXCHANGE}
+        if data.startswith("export_pick_"):
+            parts = data.split("_", 3)  # ['export', 'pick', 'BTC', 'Hyperliquid']
             if len(parts) >= 4:
                 symbol_filter = parts[2]
                 exchange_filter = parts[3]
-                await self._do_export(query, user, symbol_filter, exchange_filter)
+                exchange_label = exchange_filter if exchange_filter != "ALL" else ("All Exchanges" if user.language == "en" else "全部交易所")
+                if user.language == "en":
+                    msg_text = (
+                        f"📥 **Export {symbol_filter} — {exchange_label}**\n\n"
+                        "Step 2/2: Please choose the time range:"
+                    )
+                else:
+                    msg_text = (
+                        f"📥 **导出 {symbol_filter} — {exchange_label}**\n\n"
+                        "步骤 2/2：请选择时间范围："
+                    )
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("1 Day" if user.language == "en" else "1天", callback_data=f"export_do_{symbol_filter}_{exchange_filter}_1d"),
+                        InlineKeyboardButton("7 Days" if user.language == "en" else "7天", callback_data=f"export_do_{symbol_filter}_{exchange_filter}_7d"),
+                        InlineKeyboardButton("1 Month" if user.language == "en" else "1个月", callback_data=f"export_do_{symbol_filter}_{exchange_filter}_30d"),
+                    ]
+                ])
+                await query.edit_message_text(msg_text, reply_markup=keyboard, parse_mode="Markdown")
+            return
+
+        # Export flow step 2: execute export callback: export_do_{SYMBOL}_{EXCHANGE}_{RANGE}
+        if data.startswith("export_do_"):
+            parts = data.split("_", 4)  # ['export', 'do', 'BTC', 'Hyperliquid', '7d']
+            if len(parts) >= 4:
+                symbol_filter = parts[2]
+                exchange_filter = parts[3]
+                range_key = parts[4] if len(parts) >= 5 else "7d"
+                await self._do_export(query, user, symbol_filter, exchange_filter, range_key)
             return
 
 
@@ -863,19 +1288,27 @@ class TelegramBot:
 
                         # Step 2: auto-completes on exit
 
-                    if user.language == "en":
-                        done = (
-                            f"✅ **Payment Successful!**\n\n"
-                            f"**{job_name}** completed.\n"
-                            f"(This feature is for demonstration, no real funds were moved)"
-                        )
+                    # Real data path for /query after payment confirmation.
+                    if data == "pay_job_query":
+                        query_request = context.user_data.pop("pending_query_request", {
+                            "mode": "large",
+                            "symbol": "BTC",
+                        })
+                        await self._do_query(pay_msg, user, query_request)
                     else:
-                        done = (
-                            f"✅ **支付成功！**\n\n"
-                            f"**{job_name}** 任务已完成。\n"
-                            f"（此功能为演示效果，未实际扣取您的资金）"
-                        )
-                    await pay_msg.edit_text(done, parse_mode="Markdown")
+                        if user.language == "en":
+                            done = (
+                                f"✅ **Payment Successful!**\n\n"
+                                f"**{job_name}** completed.\n"
+                                f"(This feature is for demonstration, no real funds were moved)"
+                            )
+                        else:
+                            done = (
+                                f"✅ **支付成功！**\n\n"
+                                f"**{job_name}** 任务已完成。\n"
+                                f"（此功能为演示效果，未实际扣取您的资金）"
+                            )
+                        await pay_msg.edit_text(done, parse_mode="Markdown")
                 except Exception as e:
                     logger.error("Payment job failed: %s", e, exc_info=True)
             return

@@ -14,6 +14,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     cg_api_key: str = Field(..., description="CoinGlass API Key")
 
+    # Agent identity and deployment metadata
+    agent_id: str = "btc-whalescope-agent-prod"
+    agent_name: str = "BTC-WhaleScope-Agent"
+    bot_username: str = ""
+    app_version: str = "local-dev"
+    deploy_env: str = "production"
+    compose_project_name: str = "btc-whalescope-agent"
+    container_name: str = "btc-whalescope-agent-app"
+
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
@@ -59,9 +68,17 @@ class Settings(BaseSettings):
     heartbeat_role: str = "product"
     heartbeat_role_label_zh: str = "BTC巨鲸情报分析师"
 
+    # Tencent COS configuration (optional)
+    cos_bucket: str = ""
+    cos_region: str = ""
+    cos_secret_id: str = ""
+    cos_secret_key: str = ""
+    cos_base_url: str = ""
+
     model_config = {
         "env_file": str(PROJECT_ROOT / ".env"),
         "env_file_encoding": "utf-8",
+        "extra": "ignore",
     }
 
     @property

@@ -1,318 +1,300 @@
-# 🐳 BTC WhaleScope Agent
+# BTC WhaleScope Agent
 
-<div align="center">
+一个面向 BTC 巨鲸行为监控的自动化 Agent：
+- 实时采集 CoinGlass 多源数据（CEX 大额单、清算、Hyperliquid、链上转账）
+- 统一聚合、去重、规则告警、持久化
+- 通过 Telegram Bot 提供订阅推送、数据查询、导出与 AI 分析
+- 同时提供 HTTP + WebSocket 接口，方便二次集成
 
-**实时 BTC 巨鲸订单监控 & AI 分析 Telegram 机器人**
+## 1. 当前版本能力（与代码一致）
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python&logoColor=white)](https://python.org)
-[![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
-[![DeepSeek AI](https://img.shields.io/badge/DeepSeek-AI-FF6B35?logo=openai&logoColor=white)](https://deepseek.com)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+### 数据采集
+- `FuturesLargeOrderCollector`：CEX 合约大额限价单（默认阈值 `$500,000`）
+- `SpotLargeOrderCollector`：CEX 现货大额限价单（默认阈值 `$500,000`）
+- `LiquidationCollector`：清算订单（默认阈值 `$100,000`）
+- `HyperliquidWhaleCollector`：Hyperliquid 鲸鱼仓位异动（BTC）
+- `OnchainTransferCollector`：交易所链上转账（默认使用 `LARGE_ORDER_THRESHOLD`）
+- `CoinGlassWSClient`：订阅 `liquidationOrders` / `tradeOrders`（当前实际消费 `liquidationOrders`）
 
-</div>
+### 引擎与告警
+- `Aggregator` 负责：去重、入库、规则匹配、触发推送
+- 默认告警规则（`src/engine/alert_rules.py`）：
+  - `mega_whale`：`>= $5,000,000`
+  - `large_cex_order`：CEX 大单 `>= $1,000,000`
+  - `large_liquidation`：清算 `>= $500,000`
+  - `hyperliquid_whale`：Hyperliquid `>= $1,000,000`
+  - `large_onchain`：链上 `>= $10,000,000`
 
----
+### Telegram Bot
+- 用户命令：`/start` `/help` `/language` `/subscribe` `/status` `/stats`
+- 任务命令：`/query` `/export` `/ask` `/buy` `/sell` `/positions` `/balance`
+- 管理员命令：`/approve` `/revoke` `/users`
+- 特性：
+  - 邀请码激活（`/start Ocean1`）
+  - 订阅交易所与阈值管理
+  - 虚拟支付流程（演示账单，不真实扣款）
+  - 导出 CSV + JSON（按交易所 + 时间范围）
+  - AI 问答（DeepSeek）+ 对话历史记忆
+  - 任务进度条（步骤化消息反馈）
 
-## 📖 项目简介
-
-BTC WhaleScope Agent 是一个**全自动化的加密货币巨鲸订单监控系统**，集实时数据采集、智能告警、AI 分析和 Telegram 交互于一体。系统通过多源数据采集器实时追踪 BTC 巨鲸动向，并通过 Telegram Bot 为用户提供专业级的市场洞察服务。
-
-### 🎯 核心能力
-
-- **🔍 多交易所实时监控** — 支持 Binance、OKX、Bybit、Hyperliquid 等主流交易所的巨鲸订单追踪
-- **📡 WebSocket + REST 双通道** — CoinGlass API 实时推送 + 轮询双保障
-- **🤖 AI 深度分析** — 接入 DeepSeek 大模型，基于实时巨鲸数据提供专业市场分析
-- **💬 Telegram Bot 交互** — 完整的机器人交互体系，支持中英双语
-- **📥 数据导出** — 一键导出 CSV + JSON 格式巨鲸订单数据，支持按交易所筛选
-- **🧠 对话记忆** — AI 分析支持多轮对话记忆，追问可引用上下文
-
----
-
-## 🏗️ 系统架构
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                    Telegram Bot 交互层                     │
-│  /start · /export · /ask · /query · /lang · /help        │
-└─────────────────────────┬────────────────────────────────┘
-                          │
-┌─────────────────────────▼────────────────────────────────┐
-│                     引擎层 (Engine)                        │
-│  Aggregator（聚合器）· AlertRules（告警规则）               │
-│  AIAnalyzer（AI 分析器）· DialogHandler（对话处理）         │
-└──────┬──────────────────┬──────────────────┬─────────────┘
-       │                  │                  │
-┌──────▼──────┐  ┌────────▼────────┐  ┌─────▼─────────────┐
-│  数据采集器   │  │   存储层         │  │   推送层           │
-│             │  │                 │  │                   │
-│ • 大额限价单 │  │ • whale_orders  │  │ • Telegram Push   │
-│ • 清算订单   │  │ • users         │  │ • WebSocket       │
-│ • Hyperliquid│  │ • chat_history  │  │ • Webhook         │
-│ • 链上转账   │  │   (SQLite)      │  │                   │
-└──────┬──────┘  └─────────────────┘  └───────────────────┘
-       │
-┌──────▼────────────────────────────────────────────────────┐
-│                    外部 API 层                             │
-│  CoinGlass REST · CoinGlass WebSocket · DeepSeek AI       │
-└───────────────────────────────────────────────────────────┘
-```
+### 对外接口
+- REST API：`/health` `/api/orders` `/api/stats` `/api/config`
+- WebSocket：`/ws`（服务端推送告警，客户端可 `ping`/`pong`）
 
 ---
 
-## 📂 项目结构
+## 2. 系统架构
 
+```text
+CoinGlass REST/WS ──> Collectors ──> Aggregator ──> SQLite
+                               │            │
+                               │            ├──> WebSocket Push (/ws)
+                               │            ├──> Webhook Push
+                               │            └──> Telegram Push Dispatcher
+                               │
+                               └──> AIAnalyzer (DeepSeek)
+
+Telegram Bot <── UserDB(chat/users/subscription)
 ```
-BTC-WhaleScope-Agent/
+
+---
+
+## 3. 项目结构
+
+```text
+.
 ├── config/
-│   ├── __init__.py
 │   └── settings.py              # 全局配置（Pydantic Settings）
 ├── src/
-│   ├── main.py                  # 主入口，初始化所有组件
-│   ├── server.py                # FastAPI 服务器
-│   ├── ai/
-│   │   ├── analyzer.py          # AI 分析器封装
-│   │   └── deepseek_client.py   # DeepSeek API 客户端
-│   ├── api/
-│   │   ├── coinglass_client.py  # CoinGlass REST 客户端
-│   │   └── coinglass_ws.py      # CoinGlass WebSocket 客户端
-│   ├── collectors/
-│   │   ├── base.py              # 采集器基类（轮询 + 去重）
-│   │   ├── hyperliquid.py       # Hyperliquid 巨鲸追踪
-│   │   ├── large_order.py       # 大额限价单采集
-│   │   ├── liquidation.py       # 清算订单采集
-│   │   └── onchain.py           # 链上大额转账
-│   ├── engine/
-│   │   ├── aggregator.py        # 订单聚合 + AI 分析
-│   │   └── alert_rules.py       # 告警规则判定
-│   ├── models/
-│   │   ├── user.py              # 用户 & 聊天记录模型
-│   │   └── whale_order.py       # 巨鲸订单模型
-│   ├── push/
-│   │   ├── webhook.py           # Webhook 推送
-│   │   └── websocket_server.py  # WebSocket 实时推送
-│   ├── storage/
-│   │   ├── database.py          # 订单数据库（SQLite）
-│   │   └── user_database.py     # 用户数据库 + 聊天历史
-│   └── telegram/
-│       ├── bot.py               # Telegram Bot 主逻辑
-│       ├── dialog_handler.py    # 自然语言对话处理
-│       ├── message_formatter.py # 告警消息格式化
-│       ├── push_dispatcher.py   # 推送调度器
-│       └── user_manager.py      # 用户管理（邀请码 + 权限）
-├── .env.example                 # 环境变量模板
-├── requirements.txt             # Python 依赖
-├── Dockerfile                   # Docker 容器构建
-├── docker-compose.yml           # Docker Compose 编排
-└── start.sh                     # 启动脚本
+│   ├── main.py                  # 主程序入口，组装所有组件
+│   ├── server.py                # FastAPI 服务
+│   ├── api/                     # CoinGlass REST / WS 客户端
+│   ├── collectors/              # 各类采集器
+│   ├── engine/                  # 聚合与告警规则
+│   ├── ai/                      # DeepSeek 客户端与分析器
+│   ├── storage/                 # 订单库 + 用户库
+│   ├── telegram/                # Bot、对话、推送、进度管理
+│   └── push/                    # Webhook、WS 推送、心跳上报
+├── tests/
+├── .env.example
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+└── start.sh
 ```
 
 ---
 
-## 🚀 快速开始
+## 4. 快速开始
 
-### 1. 环境要求
+### 4.1 环境要求
+- Python 3.9+（推荐 3.11，与 Docker 一致）
+- CoinGlass API Key（必填）
+- Telegram Bot Token（启用 TG 时必填）
+- DeepSeek API Key（启用 AI 时必填）
 
-- Python 3.9+
-- Telegram Bot Token（通过 [@BotFather](https://t.me/BotFather) 创建）
-- CoinGlass API Key（[申请地址](https://www.coinglass.com/pricing)）
-- DeepSeek API Key（[申请地址](https://platform.deepseek.com/)）
-
-### 2. 安装部署
+### 4.2 安装
 
 ```bash
-# 克隆项目
 git clone https://github.com/Oceanjackson1/BTC-WhaleScope-Agent.git
 cd BTC-WhaleScope-Agent
-
-# 创建虚拟环境
 python3 -m venv venv
-source venv/bin/activate  # Linux/macOS
-# .\venv\Scripts\activate  # Windows
-
-# 安装依赖
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+### 4.3 配置
 
 ```bash
-# 复制配置模板
 cp .env.example .env
-
-# 编辑 .env 文件，填入你的 API 密钥
 ```
 
-#### 必填配置项：
+最小可运行配置（HTTP + 采集）：
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `CG_API_KEY` | CoinGlass API 密钥 | `your_coinglass_api_key` |
-| `TG_BOT_TOKEN` | Telegram Bot Token | `123456:ABC-DEF...` |
-| `TG_ADMIN_IDS` | 管理员 Telegram ID | `123456789` |
-| `DEEPSEEK_API_KEY` | DeepSeek AI 密钥 | `sk-your_deepseek_key` |
-| `TG_ENABLED` | 启用 Telegram Bot | `true` |
+```env
+CG_API_KEY=your_coinglass_api_key
+```
 
-#### 可选：Pixel Office 心跳监控
+启用 Telegram + AI 需要：
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `HEARTBEAT_ENABLED` | 是否启用心跳上报 | `true` |
-| `HEARTBEAT_URL` | Supabase REST upsert 地址 | `https://.../rest/v1/agents` |
-| `HEARTBEAT_API_KEY` | Supabase publishable key | `sb_publishable_xxx` |
-| `HEARTBEAT_BEARER_TOKEN` | Bearer Token，默认可与 API Key 相同 | `sb_publishable_xxx` |
-| `HEARTBEAT_AGENT_ID` | Agent 固定唯一 ID | `codex-btc-whalescope-01` |
-| `HEARTBEAT_NAME` | 大屏显示名称 | `BTC WhaleScope Agent` |
-| `HEARTBEAT_ROLE` | 角色标签 | `product` |
-| `HEARTBEAT_ROLE_LABEL_ZH` | 中文头衔 | `BTC巨鲸情报分析师` |
+```env
+TG_ENABLED=true
+TG_BOT_TOKEN=your_telegram_bot_token
+TG_ADMIN_IDS=123456789
+DEEPSEEK_API_KEY=your_deepseek_api_key
+```
 
-### 4. 启动服务
+### 4.4 启动
 
 ```bash
-# 直接启动
 python -m src.main
-
-# 或使用启动脚本
-chmod +x start.sh && ./start.sh
-
-# Docker 方式
-docker-compose up -d
 ```
 
----
-
-## 🤖 Telegram Bot 使用指南
-
-### 首次使用
-
-1. 在 Telegram 搜索你的 Bot 并点击 **Start**
-2. 输入邀请码激活账户：`/start Ocean1`
-3. 激活后即可使用所有功能
-
-### 命令列表
-
-| 命令 | 功能 | 费用 |
-|------|------|------|
-| `/export <币种>` | 导出巨鲸订单数据（CSV + JSON） | $0.50 |
-| `/ask <问题>` | AI 深度分析（支持多轮对话） | $1.00 |
-| `/query` | 实时数据查询 | $0.20 |
-| `/buy` | 跟单买入 | $1.00 |
-| `/sell` | 跟单卖出 | $1.00 |
-| `/positions` | 查询持仓 | $0.30 |
-| `/balance` | 查询余额 | $0.10 |
-| `/lang` | 切换语言（中/英） | - |
-| `/help` | 帮助信息 | - |
-
-> **注**: 费用为展示定价，当前版本未实际收费。
-
-### 数据导出功能
-
-```
-用户: /export BTC
-Bot:  📥 导出 BTC 巨鲸订单
-      请选择您想导出的交易所：
-      [Hyperliquid] [Binance]
-      [OKX]         [🌐 全部交易所]
-
-用户: (点击 Hyperliquid)
-Bot:  ✅ 找到 78 条记录，发送中...
-      📎 whale_orders_BTC_Hyperliquid_20260227.csv
-      📎 whale_orders_BTC_Hyperliquid_20260227.json
-```
-
-### AI 分析功能（支持多轮对话记忆）
-
-```
-用户: /ask BTC巨鲸最近的买卖趋势是什么？
-Bot:  🤖 AI Analysis
-      根据过去1小时数据，BTC巨鲸活动呈现净卖出倾向...
-
-用户: /ask 买方力量怎么样？有没有反转信号？
-Bot:  🤖 AI Analysis
-      (引用上一轮分析) 买方支撑目前较弱...
-```
-
----
-
-## 📊 数据采集源
-
-| 采集器 | 数据来源 | 采集方式 | 默认间隔 |
-|--------|---------|---------|---------|
-| `large_order` | CoinGlass 大额限价单 | REST 轮询 | 10s |
-| `liquidation` | CoinGlass 清算订单 | REST 轮询 | 10s |
-| `hyperliquid` | Hyperliquid 巨鲸动向 | REST 轮询 | 10s |
-| `onchain` | 链上大额转账 | REST 轮询 | 60s |
-| `coinglass_ws` | CoinGlass WebSocket | 实时推送 | 实时 |
-
-### 告警阈值
-
-- **大额订单**: ≥ $500,000 USD
-- **清算订单**: ≥ $100,000 USD
-- 阈值可在 `.env` 中自定义调整
-
----
-
-## 🔧 高级配置
-
-### 监控交易所
-
-```env
-# 支持的交易所（逗号分隔）
-EXCHANGES=Binance,OKX,Bybit
-```
-
-### AI 模型参数
-
-```env
-DEEPSEEK_MODEL=deepseek-chat
-DEEPSEEK_MAX_TOKENS=1000
-DEEPSEEK_TEMPERATURE=0.7
-```
-
-### 推送通道
-
-```env
-# WebSocket 实时推送
-WS_PUSH_ENABLED=true
-
-# Webhook 回调
-WEBHOOK_PUSH_ENABLED=false
-WEBHOOK_URLS=https://your-webhook-url.com/callback
-```
-
----
-
-## 🐳 Docker 部署
+或：
 
 ```bash
-# 构建并启动
-docker-compose up -d
+bash start.sh
+```
 
-# 查看日志
-docker-compose logs -f
+或 Docker：
 
-# 停止服务
-docker-compose down
+```bash
+docker compose up -d
 ```
 
 ---
 
-## 🛡️ 安全说明
+## 5. 关键环境变量
 
-- 所有 API 密钥通过 `.env` 文件管理，已在 `.gitignore` 中排除
-- 邀请码系统防止未授权访问
-- 管理员权限独立控制用户审批
-- 数据库文件（`.db`）不会被提交到仓库
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `CG_API_KEY` | CoinGlass API Key（必填） | 无 |
+| `TG_ENABLED` | 是否启用 Telegram Bot | `false` |
+| `TG_BOT_TOKEN` | Telegram Bot Token | 空 |
+| `TG_ADMIN_IDS` | 管理员 ID（逗号分隔） | 空 |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key | 空 |
+| `DEEPSEEK_MODEL` | AI 模型 | `deepseek-chat` |
+| `HOST` / `PORT` | FastAPI 监听地址 | `0.0.0.0:8000` |
+| `DB_PATH` | 订单库路径 | `data/whale_orders.db` |
+| `USER_DB_PATH` | 用户库路径 | `data/users.db` |
+| `EXCHANGES` | 轮询交易所 | `Binance,OKX,Bybit` |
+| `LARGE_ORDER_THRESHOLD` | 大单阈值（USD） | `500000` |
+| `LIQUIDATION_THRESHOLD` | 清算阈值（USD） | `100000` |
+| `WS_PUSH_ENABLED` | 是否启用 `/ws` 告警推送 | `true` |
+| `WEBHOOK_PUSH_ENABLED` | 是否启用 Webhook 推送 | `false` |
+| `WEBHOOK_URLS` | Webhook 地址（逗号分隔） | 空 |
+| `HEARTBEAT_ENABLED` | Pixel Office 心跳上报 | `false` |
+
+说明：`.env.example` 里的 Tencent COS 变量当前为预留配置，主流程尚未使用。
 
 ---
 
-## 📄 开源协议
+## 6. Telegram 使用说明
 
-本项目采用 [MIT License](LICENSE) 开源协议。
+### 6.1 激活流程
+1. 给 Bot 发送 `/start`
+2. 使用邀请码激活：`/start Ocean1`
+3. 或由管理员执行 `/approve <telegram_id>`
+
+### 6.2 常用命令
+
+| 命令 | 说明 |
+|---|---|
+| `/query [mode] [symbol]` | 查询订单数据（`large/onchain/spot/futures`，默认 `large BTC`） |
+| `/export [symbol]` | 导出订单（先选交易所，再选 1d/7d/30d） |
+| `/ask <问题>` | AI 分析（带聊天上下文） |
+| `/subscribe` | 订阅交易所/阈值 |
+| `/status` | 系统状态 |
+| `/stats` | 个人统计 |
+
+交易命令 `/buy` `/sell` `/positions` `/balance` 当前是演示流程，不会真实下单或扣款。
+
+### 6.3 查询行为说明
+- `/query onchain`、`/query spot` 若无数据，会回退到同币种最近巨鲸事件
+- 受 CoinGlass 套餐影响，某些接口可能返回升级提示，采集器会自动暂停该源
 
 ---
 
-<div align="center">
+## 7. HTTP / WS API
 
-**Built with ❤️ for crypto whale watchers**
+### 7.1 健康检查
 
-</div>
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+### 7.2 查询订单
+
+```bash
+curl "http://127.0.0.1:8000/api/orders?limit=50&exchange=Binance&min_amount=500000"
+```
+
+参数：
+- `limit`：1-500
+- `source`：`cex_futures | cex_spot | dex_hyperliquid | onchain`
+- `exchange`：交易所名
+- `min_amount`：最小金额（USD）
+
+### 7.3 统计与配置
+
+```bash
+curl http://127.0.0.1:8000/api/stats
+curl http://127.0.0.1:8000/api/config
+```
+
+### 7.4 WebSocket
+
+```text
+ws://127.0.0.1:8000/ws
+```
+
+- 连接成功会收到 `connected` 消息
+- 告警消息类型为 `whale_alert`
+- 客户端可发送 `ping`，服务端回复 `pong`
+
+---
+
+## 8. 数据存储
+
+### 8.1 `whale_orders`（订单库）
+核心字段：
+- `id`（主键）
+- `source` / `order_type`
+- `exchange` / `symbol` / `side`
+- `price` / `amount_usd` / `quantity`
+- `timestamp` / `metadata`
+
+### 8.2 `users` + `chat_history`（用户库）
+- 用户状态、语言、订阅交易所、最小告警阈值
+- 对话历史（用于 `/ask` 上下文）
+
+---
+
+## 9. 运行与运维
+
+### 日志
+- 默认控制台日志
+- `docker-compose` 配置了日志轮转（20MB x 5）
+
+### 心跳上报
+启用 `HEARTBEAT_ENABLED=true` 后，会向 Supabase/Pixel Office 上报：
+- `working`（运行中）
+- `idle`（关闭）
+- `thinking`（异常阶段）
+
+### 安全建议
+- 不要提交 `.env`
+- 定期轮换 `CG_API_KEY`、`TG_BOT_TOKEN`、`DEEPSEEK_API_KEY`
+- `TG_ADMIN_IDS` 只保留可信账号
+
+---
+
+## 10. 测试
+
+```bash
+# 基础系统测试（导入/配置检查）
+python test_system.py
+
+# 全量模块测试
+python tests/test_all.py
+
+# 数据质量测试（会访问真实 API）
+python tests/test_data_quality.py
+```
+
+说明：`test_data_quality.py` 会请求线上数据并在桌面输出报告文件，请在可联网且密钥有效时运行。
+
+---
+
+## 11. 已知限制
+
+- 当前聚焦 BTC 相关数据流，非 BTC 交易对支持有限
+- 部分 CoinGlass 端点受套餐权限限制
+- `/buy` `/sell` 等交易命令尚未接入真实执行通道
+- Tencent COS 参数已预留，尚未纳入主流程
+
+---
+
+## 12. 免责声明
+
+本项目仅用于数据监控与研究分析，不构成任何投资建议。数字资产交易风险高，请独立判断并自行承担风险。
