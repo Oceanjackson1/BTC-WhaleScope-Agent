@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 import json
-from typing import Any
+import logging
+import re
+from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
@@ -18,7 +19,7 @@ class DeepseekClient:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self._client:Optional[ AsyncOpenAI] = None
+        self._client: Optional[AsyncOpenAI] = None
 
     async def start(self) -> None:
         """Initialize the client."""
@@ -62,15 +63,13 @@ class DeepseekClient:
                 temperature=self.settings.deepseek_temperature,
             )
 
-            content = response.choices[0].message.content
-
-            # Try to parse JSON response
-            try:
-                analysis = json.loads(content)
-                return self._normalize_analysis(analysis)
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse AI response as JSON")
+            content = response.choices[0].message.content or ""
+            analysis = self._parse_analysis_json(content)
+            if analysis is None:
+                preview = content.replace("\n", " ")[:160]
+                logger.warning("Failed to parse AI response as JSON: %s", preview)
                 return self._default_analysis()
+            return self._normalize_analysis(analysis)
 
         except Exception as e:
             logger.error("Deepseek API error: %s", e, exc_info=True)
@@ -185,6 +184,39 @@ Output only JSON, no other text.
             "risk_level": analysis.get("risk_level", "medium"),
             "suggestion": analysis.get("suggestion", "建议观望"),
         }
+
+    def _parse_analysis_json(self, content: str) -> Optional[dict[str, Any]]:
+        """Parse JSON even when wrapped in markdown fences or extra text."""
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        candidates = [text]
+
+        # Common case from LLMs: ```json ... ```
+        if text.startswith("```"):
+            unfenced = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            unfenced = re.sub(r"\s*```$", "", unfenced)
+            candidates.append(unfenced.strip())
+
+        # Fallback: extract outer-most JSON object.
+        for candidate in list(candidates):
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                extracted = candidate[start : end + 1].strip()
+                if extracted not in candidates:
+                    candidates.append(extracted)
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+
+        return None
 
     def _safe_number(self, value: Any, default: float = 0.0) -> float:
         """Convert nullable numeric input to a safe float for prompt formatting."""

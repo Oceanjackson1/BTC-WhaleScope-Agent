@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import json
+from typing import TYPE_CHECKING, Optional
 
 from config.settings import get_settings
 from src.models.user import User
@@ -116,6 +117,31 @@ class UserManager:
             subscribed_exchanges,
             min_alert_threshold,
             language,
+        )
+
+    async def update_push_preferences(
+        self,
+        telegram_id: int,
+        alerts_enabled: Optional[bool] = None,
+        push_channel: Optional[str] = None,
+        push_group_chat_id: Optional[int] = None,
+        custom_webhook_url: Optional[str] = None,
+    ) -> None:
+        """Update user push route / state."""
+        await self.db.update_push_settings(
+            telegram_id=telegram_id,
+            alerts_enabled=alerts_enabled,
+            push_channel=push_channel,
+            push_group_chat_id=push_group_chat_id,
+            custom_webhook_url=custom_webhook_url,
+        )
+        logger.info(
+            "Push preferences updated for user %d: enabled=%s channel=%s group=%s webhook=%s",
+            telegram_id,
+            alerts_enabled,
+            push_channel,
+            push_group_chat_id,
+            bool(custom_webhook_url),
         )
 
     async def get_active_users_for_alert(

@@ -9,7 +9,7 @@ import csv
 import io
 import json
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -87,6 +87,10 @@ class TelegramBot:
                 ("status", "系统状态 / System Status"),
                 ("stats", "个人统计 / Personal Stats"),
                 ("subscribe", "订阅管理 / Manage Subscriptions"),
+                ("bindgroup", "绑定群聊推送 / Bind Group Push"),
+                ("query", "查询开仓 / Query opens"),
+                ("export", "导出开仓 / Export opens"),
+                ("ask", "AI 分析 / AI analysis"),
             ])
             
         await self._application.start()
@@ -114,6 +118,7 @@ class TelegramBot:
         app.add_handler(CommandHandler("help", self._help_command))
         app.add_handler(CommandHandler("language", self._language_command))
         app.add_handler(CommandHandler("subscribe", self._subscribe_command))
+        app.add_handler(CommandHandler("bindgroup", self._bindgroup_command))
         app.add_handler(CommandHandler("stats", self._stats_command))
         app.add_handler(CommandHandler("status", self._status_command))
 
@@ -121,10 +126,6 @@ class TelegramBot:
         app.add_handler(CommandHandler("query", self._query_command))
         app.add_handler(CommandHandler("export", self._export_command))
         app.add_handler(CommandHandler("ask", self._ask_command))
-        app.add_handler(CommandHandler("buy", self._buy_command))
-        app.add_handler(CommandHandler("sell", self._sell_command))
-        app.add_handler(CommandHandler("positions", self._positions_command))
-        app.add_handler(CommandHandler("balance", self._balance_command))
 
         # Admin commands
         app.add_handler(CommandHandler("approve", self._approve_command))
@@ -166,34 +167,35 @@ class TelegramBot:
         # Always show job offerings layout
         if user.language == "en":
             welcome_header = (
-                "🤖 Hey! I am your BTC Whale Monitoring AI Agent.\n\n"
-                "I am an AI Data Analyst focusing on on-chain tracking and exchange whale movements.\n"
-                "You can hire me for the following tasks—from data queries to trade execution, charged per task.\n\n"
+                "🤖 Hyperliquid WhaleScope AI Agent is ready.\n\n"
+                "This AI Agent specializes in detecting whale OPEN positions on Hyperliquid from CoinGlass real-time data.\n\n"
             )
             
             menu_body = (
-                "—— 📊 Data Query —— as low as $0.10/time\n"
-                "· Whale Order Tracking → /query large        $0.10\n"
-                "· On-chain Tracking → /query onchain         $0.10\n"
-                "· Spot Order Book Tracking → /query spot     $0.20\n"
-                "· Futures Depth Tracking → /query futures    $0.20\n\n"
+                "—— 🤖 AI Agent Capabilities ——\n"
+                "• Real-time whale open detection (LONG/SHORT)\n"
+                "• Wallet-level open-position tracking\n"
+                "• Open heat leaderboard (1h / 4h / 24h)\n"
+                "• AI interpretation + risk hints\n"
+                "• Export-ready structured datasets\n\n"
+                "—— 🐋 Whale Definition ——\n"
+                "• Whale open alert: notional ≥ $1,000,000\n"
+                "• Focus whale alert: notional ≥ $5,000,000\n"
+                "• Mega whale alert: notional ≥ $10,000,000\n\n"
+                "—— 📊 Data Query —— $0.10/time\n"
+                "· Open positions feed → /query open BTC      $0.10\n"
+                "· Wallet open history → /query wallet 0x...  $0.10\n"
+                "· Top open board → /query top 24h            $0.10\n\n"
                 "—— 📥 Data Export —— $0.80/time\n"
-                "· Export Whale Trades + Orderbook\n"
-                "→ /export <symbol>                           $0.80\n"
-                "Delivery: CSV (Trades) + JSON (Depth)\n\n"
-                "—— 🤖 AI Analysis —— $0.50 ~ $1.00/time\n"
+                "· Export Hyperliquid open records\n"
+                "→ /export open BTC 7d                        $0.80\n"
+                "Delivery: CSV + JSON\n\n"
+                "—— 🤖 AI Analysis —— $0.50/time\n"
                 "· AI Q&A → /ask <question>                   $0.50\n"
-                "· Deep Market Analysis + Trade Signals\n"
-                "→ /ask <question> [symbol]                   $1.00\n"
-                "Signals based on real trades + whale positions\n\n"
-                "—— 💰 Trade Execution —— $1.00/tx\n"
-                "· Copy Buy → /buy                            $1.00\n"
-                "· Copy Sell → /sell                          $1.00\n"
-                "· Check Positions → /positions               $0.10\n"
-                "· Check Balance → /balance                   $0.10\n\n"
+                "Signals are based on Hyperliquid whale opens only.\n\n"
                 "—— 🔧 Account Management —— Free\n"
                 "/subscribe · /status · /stats · /language\n\n"
-                "💡 Support symbol parameters (e.g. BTC, ETH, SOL).\n"
+                "💡 Symbols supported by CoinGlass Hyperliquid endpoint are available (BTC/ETH/SOL...).\n"
                 "Type /help to see the full menu anytime."
             )
             
@@ -203,34 +205,35 @@ class TelegramBot:
                 msg = welcome_header + menu_body
         else:
             welcome_header = (
-                "🤖 Hey! 我是您的 BTC Whale Monitoring AI Agent.\n\n"
-                "我是一个专注于 比特币链上及交易所巨鲸动向 的 AI 数据分析师。\n"
-                "您可以雇佣我完成以下工作——从数据查询到下单跟单，按件计费。\n\n"
+                "🤖 Hyperliquid WhaleScope AI Agent 已启动。\n\n"
+                "这是一个专注于 Hyperliquid 鲸鱼开仓检测的 AI Agent，基于 CoinGlass 实时数据持续追踪鲸鱼开仓行为。\n\n"
             )
             
             menu_body = (
-                "—— 📊 数据查询 —— 低至 $0.10/次\n"
-                "· 巨鲸大单追踪 → /query large        $0.10\n"
-                "· 链上异动追踪 → /query onchain      $0.10\n"
-                "· 现货大单追踪 → /query spot         $0.20\n"
-                "· 合约深度追踪 → /query futures      $0.20\n\n"
+                "—— 🤖 AI Agent 能力 ——\n"
+                "• 实时检测鲸鱼开仓（LONG/SHORT）\n"
+                "• 钱包级开仓行为追踪\n"
+                "• 开仓热度排行榜（1h / 4h / 24h）\n"
+                "• AI 解读 + 风险提示\n"
+                "• 结构化数据导出\n\n"
+                "—— 🐋 巨鲸定义（告警分层）——\n"
+                "• 标准巨鲸开仓：单笔名义价值 ≥ $1,000,000\n"
+                "• 重点巨鲸开仓：单笔名义价值 ≥ $5,000,000\n"
+                "• 超级巨鲸开仓：单笔名义价值 ≥ $10,000,000\n\n"
+                "—— 📊 数据查询 —— $0.10/次\n"
+                "· 开仓事件流 → /query open BTC       $0.10\n"
+                "· 钱包开仓历史 → /query wallet 0x... $0.10\n"
+                "· 开仓排行榜 → /query top 24h         $0.10\n\n"
                 "—— 📥 数据导出 —— $0.80/次\n"
-                "· 导出鲸鱼真实成交 + 订单簿\n"
-                "→ /export <币种>                     $0.80\n"
-                "交付: CSV (成交记录) + JSON (完整深度)\n\n"
-                "—— 🤖 AI 分析 —— $0.50 ~ $1.00/次\n"
+                "· 导出 Hyperliquid 开仓记录\n"
+                "→ /export open BTC 7d                $0.80\n"
+                "交付: CSV + JSON\n\n"
+                "—— 🤖 AI 分析 —— $0.50/次\n"
                 "· AI 智能问答 → /ask <问题>          $0.50\n"
-                "· 锁定行情深度分析 + 下单建议\n"
-                "→ /ask <问题> [币种]                 $1.00\n"
-                "基于真实成交 + 巨鲸持仓数据给出方向建议\n\n"
-                "—— 💰 交易执行 —— $1.00/笔\n"
-                "· 自动跟单买入 → /buy                  $1.00\n"
-                "· 自动跟单卖出 → /sell                 $1.00\n"
-                "· 查持仓 → /positions                $0.10\n"
-                "· 查余额 → /balance                  $0.10\n\n"
+                "信号基于 Hyperliquid 鲸鱼开仓数据。\n\n"
                 "—— 🔧 账户管理 —— 免费\n"
                 "/subscribe · /status · /stats · /language\n\n"
-                "💡 所有「币种」参数支持币种代号 (如 BTC, ETH, SOL)。\n"
+                "💡 支持 CoinGlass Hyperliquid 接口可用币种（如 BTC/ETH/SOL）。\n"
                 "输入 /help 随时查看完整菜单。"
             )
             
@@ -265,30 +268,135 @@ class TelegramBot:
     ) -> None:
         """Handle /help command."""
         help_text = """
-*🐋 BTC 鲸鱼订单监控系统*
+*🤖 Hyperliquid WhaleScope AI Agent*
+
+*AI Agent 支持的功能：*
+• 实时检测 Hyperliquid 鲸鱼开仓事件
+• 钱包级开仓历史追踪
+• 开仓热度排行榜（1h/4h/24h）
+• AI 趋势解读与风险提示
+• CSV + JSON 结构化数据导出
 
 *基础命令：*
 /start - 开始使用
-/help - 显示帮助信息
-/status - 查看系统状态
-/stats - 查看个人统计
+/help - 显示帮助
+/status - 系统状态
+/stats - 个人统计
+/language - 切换语言
 
-*订阅管理：*
-/subscribe - 设置订阅偏好
+*核心命令：*
+/query open BTC [page] - 查询开仓事件流（分页）
+/query wallet <0x地址> [page] - 查询钱包开仓历史
+/query top [1h|4h|24h] - 查询开仓排行榜
+/export open BTC [1d|7d|30d] - 导出开仓数据
+/ask <问题> - AI 分析
 
-*查询命令（自然语言）：*
-• "最近 1 小时的大单趋势"
-• "分析 Binance 的大单"
-• "给我看最近的爆仓单"
+*订阅：*
+/subscribe - 订阅设置（开关/阈值/推送渠道）
+/bindgroup - 在群里绑定群推送（先把 Bot 拉进群）
 
 *管理员命令：*
 /approve <user_id> - 审核用户
 /revoke <user_id> - 撤销用户
 /users - 查看所有用户
-
-💡 提示：发送任意问题即可获取 AI 分析结果！
         """
         await update.message.reply_text(help_text, parse_mode="Markdown")
+
+    @staticmethod
+    def _mask_webhook(url: str) -> str:
+        if not url:
+            return "未设置"
+        if len(url) <= 18:
+            return "***"
+        return f"{url[:12]}...{url[-6:]}"
+
+    def _push_channel_label(self, user) -> str:
+        channel = (user.push_channel or "dm").lower()
+        if channel == "group":
+            if user.push_group_chat_id:
+                return f"Telegram 群聊 (ID: `{user.push_group_chat_id}`)"
+            return "Telegram 群聊 (未绑定，请在目标群发送 /bindgroup)"
+        if channel == "webhook":
+            return f"Webhook ({self._mask_webhook(user.custom_webhook_url or '')})"
+        return "Telegram 私聊"
+
+    def _build_subscribe_keyboard(self, user) -> InlineKeyboardMarkup:
+        enabled_text = "⏸ 停止推送" if user.alerts_enabled else "▶️ 恢复推送"
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"{'✅ ' if 'Hyperliquid' in (user.subscribed_exchanges or []) else ''}Hyperliquid",
+                    callback_data="sub_hyperliquid",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if not user.subscribed_exchanges else ''}全部",
+                    callback_data="sub_all",
+                ),
+            ],
+            [
+                InlineKeyboardButton("设置金额阈值", callback_data="sub_threshold"),
+                InlineKeyboardButton(enabled_text, callback_data="sub_toggle_push"),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'✅ ' if (user.push_channel or 'dm') == 'dm' else ''}私聊推送",
+                    callback_data="sub_channel_dm",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if (user.push_channel or 'dm') == 'group' else ''}群聊推送",
+                    callback_data="sub_channel_group",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if (user.push_channel or 'dm') == 'webhook' else ''}Webhook",
+                    callback_data="sub_channel_webhook",
+                ),
+            ],
+            [
+                InlineKeyboardButton("完成", callback_data="sub_done"),
+            ],
+        ])
+
+    def _build_subscribe_text(self, user) -> str:
+        current_exchanges = (
+            ", ".join(user.subscribed_exchanges)
+            if user.subscribed_exchanges
+            else "Hyperliquid(默认)"
+        )
+        push_state = "开启" if user.alerts_enabled else "停止"
+        return (
+            "*订阅设置*\n\n"
+            f"当前订阅源: {current_exchanges}\n"
+            f"当前金额阈值: ${user.min_alert_threshold:,.0f}\n"
+            f"推送状态: {push_state}\n"
+            f"推送渠道: {self._push_channel_label(user)}\n\n"
+            "可选渠道：Telegram 私聊 / Telegram 群聊 / 自定义 Webhook\n"
+            "如需群推送：把 Bot 拉进群后，在该群发送 `/bindgroup`。"
+        )
+
+    async def _bindgroup_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Bind current group chat as push destination for this user."""
+        user_id = update.effective_user.id
+        chat = update.effective_chat
+        if chat.type not in {"group", "supergroup"}:
+            await update.message.reply_text("请在目标群里发送 `/bindgroup` 来绑定群推送。", parse_mode="Markdown")
+            return
+
+        if not await self.user_manager.is_active(user_id):
+            await update.message.reply_text("您的账号尚未激活，请先完成激活。")
+            return
+
+        await self.user_manager.update_push_preferences(
+            user_id,
+            alerts_enabled=True,
+            push_channel="group",
+            push_group_chat_id=chat.id,
+        )
+        await update.message.reply_text(
+            f"✅ 已绑定当前群为推送目的地。\n群ID: `{chat.id}`\n后续告警将推送到本群。",
+            parse_mode="Markdown",
+        )
 
     async def _subscribe_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -302,36 +410,10 @@ class TelegramBot:
             )
             return
 
-        # Create subscription menu
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Binance", callback_data="sub_binance"),
-                InlineKeyboardButton("OKX", callback_data="sub_okx"),
-            ],
-            [
-                InlineKeyboardButton("Bybit", callback_data="sub_bybit"),
-                InlineKeyboardButton("全部交易所", callback_data="sub_all"),
-            ],
-            [
-                InlineKeyboardButton(
-                    "设置金额阈值", callback_data="sub_threshold"
-                ),
-                InlineKeyboardButton("完成", callback_data="sub_done"),
-            ],
-        ])
-
         user = await self.user_manager.get_user(user_id)
-        current_exchanges = (
-            ", ".join(user.subscribed_exchanges)
-            if user.subscribed_exchanges
-            else "全部"
-        )
-
+        keyboard = self._build_subscribe_keyboard(user)
         await update.message.reply_text(
-            f"*订阅设置*\n\n"
-            f"当前订阅的交易所: {current_exchanges}\n"
-            f"当前金额阈值: ${user.min_alert_threshold:,.0f}\n\n"
-            f"请选择要订阅的交易所或设置金额阈值:",
+            self._build_subscribe_text(user),
             reply_markup=keyboard,
             parse_mode="Markdown",
         )
@@ -341,16 +423,12 @@ class TelegramBot:
     ) -> None:
         """Handle /status command."""
         status_text = f"""
-*📊 系统状态*
+*📊 系统状态（Hyperliquid WhaleScope AI Agent）*
 
-🔴 CoinGlass API: 运行中
+🟢 CoinGlass Hyperliquid API: 运行中
 🤖 AI 分析: {'运行中' if self.settings.deepseek_api_key else '未配置'}
-
 👥 活跃用户: {len(await self.user_manager.get_all_active_users())}
-
-📡 监控的交易所: {', '.join(get_settings().exchange_list)}
-
-⚙️ 配置的交易所: {get_settings().exchanges}
+📡 监控能力: Hyperliquid 鲸鱼开仓实时检测
         """
 
         await update.message.reply_text(status_text, parse_mode="Markdown")
@@ -386,8 +464,10 @@ class TelegramBot:
 ✅ **状态:** {'活跃' if user.is_active else '未激活'}
 
 📊 **订阅设置:**
-   • 交易所: {', '.join(user.subscribed_exchanges) if user.subscribed_exchanges else '全部'}
+   • 来源: {', '.join(user.subscribed_exchanges) if user.subscribed_exchanges else 'Hyperliquid(默认)'}
    • 金额阈值: ${user.min_alert_threshold:,.0f}
+   • 推送状态: {'开启' if user.alerts_enabled else '停止'}
+   • 推送渠道: {self._push_channel_label(user)}
 
 📅 **注册时间:** {user.created_at.strftime('%Y-%m-%d %H:%M')}
 🕐 **最后活跃:** {user.last_active_at.strftime('%Y-%m-%d %H:%M') if user.last_active_at else '无'}
@@ -396,57 +476,45 @@ class TelegramBot:
 
         await update.message.reply_text(stats_text, parse_mode="Markdown")
 
-    async def _execute_dummy_job(self, update: Update, command_name: str, english_name: str, chinese_name: str, price: float) -> None:
-        """Helper to check permissions and run a simulated job."""
-        user_id = update.effective_user.id
-        user = await self.user_manager.get_user(user_id)
-        if not user:
-            return
+    @staticmethod
+    def _parse_page_token(token: str) -> Optional[int]:
+        clean = token.strip().lower()
+        if not clean:
+            return None
+        if clean.isdigit():
+            return int(clean)
+        if clean.startswith("page=") and clean[5:].isdigit():
+            return int(clean[5:])
+        if clean.startswith("p=") and clean[2:].isdigit():
+            return int(clean[2:])
+        if clean.startswith("p") and clean[1:].isdigit():
+            return int(clean[1:])
+        return None
 
-        if not user.is_active:
-            msg = "⚠️ Please input invite code (e.g. `/start Ocean1`) first." if user.language == "en" else "⚠️ 请先输入验证码激活（例如：`/start Ocean1`）"
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            return
-
-        job_name = english_name if user.language == "en" else chinese_name
-        
-        btn_text = f"💳 Pay ${price:.2f}" if user.language == "en" else f"💳 确认支付 ${price:.2f}"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(btn_text, callback_data=f"pay_job_{command_name}")]
-        ])
-        
-        if user.language == "en":
-            msg = (
-                f"🧾 **Virtual Invoice**\n\n"
-                f"Target Job: **{job_name}**\n"
-                f"Total Cost: **${price:.2f}**\n\n"
-                f"Please complete your payment below to execute task:"
-            )
-        else:
-            msg = (
-                f"🧾 **虚拟账单**\n\n"
-                f"您选择了服务：**{job_name}**\n"
-                f"服务费用：**${price:.2f}**\n\n"
-                f"请点击下方按钮完成支付以启动任务："
-            )
-        await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
+    @staticmethod
+    def _safe_utc_hms(timestamp_ms: int) -> str:
+        try:
+            if timestamp_ms <= 0:
+                return "--:--:--"
+            return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).strftime("%H:%M:%S")
+        except Exception:
+            return "--:--:--"
 
     def _parse_query_request(
         self,
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
-    ) -> dict[str, str]:
-        """Parse query mode and symbol from command args/text."""
+    ) -> dict[str, str | int]:
+        """Parse query mode and parameters from command args/text."""
         mode_alias = {
-            "large": "large",
-            "onchain": "onchain",
-            "spot": "spot",
-            "futures": "futures",
-            "大单": "large",
-            "链上": "onchain",
-            "现货": "spot",
-            "合约": "futures",
-            "期货": "futures",
+            "open": "open",
+            "wallet": "wallet",
+            "top": "top",
+            "开仓": "open",
+            "钱包": "wallet",
+            "地址": "wallet",
+            "排行": "top",
+            "排行榜": "top",
         }
 
         tokens: list[str] = []
@@ -461,125 +529,108 @@ class TelegramBot:
                 else:
                     tokens = parts
 
-        mode = "large"
+        mode = "open"
         symbol = "BTC"
+        wallet = ""
+        window = "24h"
+        page = 1
+        rest: list[str] = []
         if tokens:
             first = tokens[0]
             normalized_mode = mode_alias.get(first.lower()) or mode_alias.get(first)
             if normalized_mode:
                 mode = normalized_mode
-                if len(tokens) > 1:
-                    symbol = tokens[1]
+                rest = tokens[1:]
             else:
-                symbol = first
-                if len(tokens) > 1:
-                    maybe_mode = mode_alias.get(tokens[1].lower()) or mode_alias.get(tokens[1])
-                    if maybe_mode:
-                        mode = maybe_mode
+                rest = tokens
 
+        if mode == "wallet":
+            if rest:
+                wallet = re.sub(r"[^A-Za-z0-9_xX-]", "", rest[0])
+                for token in rest[1:]:
+                    maybe_page = self._parse_page_token(token)
+                    if maybe_page:
+                        page = maybe_page
+                        break
+        elif mode == "top":
+            if rest and rest[0].lower() in {"1h", "4h", "24h"}:
+                window = rest[0].lower()
+        else:
+            if rest:
+                symbol = rest[0]
+                for token in rest[1:]:
+                    maybe_page = self._parse_page_token(token)
+                    if maybe_page:
+                        page = maybe_page
+                        break
+
+        page = max(1, min(page, 999))
         symbol = re.sub(r"[^A-Za-z0-9_-]", "", symbol.upper()) or "BTC"
-        return {"mode": mode, "symbol": symbol}
+        return {"mode": mode, "symbol": symbol, "wallet": wallet, "window": window, "page": page}
 
     def _query_meta(self, mode: str, language: str) -> tuple[str, float]:
         """Get display name and price for query mode."""
         mode_name_en = {
-            "large": "Whale Large Orders",
-            "onchain": "On-chain Transfers",
-            "spot": "Spot Order Flow",
-            "futures": "Futures Order Flow",
+            "open": "Hyperliquid Open Feed",
+            "wallet": "Wallet Open History",
+            "top": "Open Leaderboard",
         }
         mode_name_zh = {
-            "large": "巨鲸大单",
-            "onchain": "链上异动",
-            "spot": "现货追踪",
-            "futures": "合约追踪",
+            "open": "Hyperliquid 开仓流",
+            "wallet": "钱包开仓历史",
+            "top": "开仓排行榜",
         }
         price_map = {
-            "large": 0.10,
-            "onchain": 0.10,
-            "spot": 0.20,
-            "futures": 0.20,
+            "open": 0.10,
+            "wallet": 0.10,
+            "top": 0.10,
         }
-        name = mode_name_en.get(mode, mode_name_en["large"]) if language == "en" else mode_name_zh.get(mode, mode_name_zh["large"])
-        return name, price_map.get(mode, 0.20)
+        name = mode_name_en.get(mode, mode_name_en["open"]) if language == "en" else mode_name_zh.get(mode, mode_name_zh["open"])
+        return name, price_map.get(mode, 0.10)
 
     async def _do_query(
         self,
         msg,
         user,
-        query_request: dict[str, str],
+        query_request: dict[str, str | int],
     ) -> None:
-        """Run a real query against whale_orders and render summary rows."""
+        """Run Hyperliquid open-position queries and render response."""
         if not self.db or not hasattr(self.db, "_conn") or self.db._conn is None:
             err = "❌ Database not available." if user.language == "en" else "❌ 数据库尚未就绪，请稍后再试。"
             await msg.edit_text(err)
             return
 
-        mode = query_request.get("mode", "large")
-        symbol = query_request.get("symbol", "BTC")
+        mode = str(query_request.get("mode", "open"))
+        symbol = str(query_request.get("symbol", "BTC"))
+        wallet = str(query_request.get("wallet", "")).strip()
+        window = str(query_request.get("window", "24h")).lower()
+        page = int(query_request.get("page", 1) or 1)
+        page = max(1, min(page, 999))
+        page_size = 20
 
         mode_name, _ = self._query_meta(mode, user.language)
-        title_zh = f"数据查询：{mode_name} {symbol}"
-        title_en = f"Data Query: {mode_name} {symbol}"
+        if mode == "wallet":
+            title_zh = f"数据查询：{mode_name} {wallet or '(empty)'} P{page}"
+            title_en = f"Data Query: {mode_name} {wallet or '(empty)'} P{page}"
+        elif mode == "top":
+            title_zh = f"数据查询：{mode_name} {window}"
+            title_en = f"Data Query: {mode_name} {window}"
+        else:
+            title_zh = f"数据查询：{mode_name} {symbol} P{page}"
+            title_en = f"Data Query: {mode_name} {symbol} P{page}"
         steps = query_steps()
 
-        filters = ["symbol LIKE ?"]
-        params: list[object] = [f"%{symbol}%"]
-
-        if mode == "onchain":
-            filters.append("source = ?")
-            params.append("onchain")
-        elif mode == "spot":
-            filters.append("source = ?")
-            params.append("cex_spot")
-        elif mode == "futures":
-            filters.append("(source = ? OR source = ?)")
-            params.extend(["cex_futures", "dex_hyperliquid"])
-        else:
-            filters.append("(order_type = ? OR order_type = ?)")
-            params.extend(["large_limit", "whale_position"])
-
-        where_clause = " AND ".join(filters)
-        breakdown_rows = []
+        base_where = (
+            "source = 'dex_hyperliquid' AND order_type = 'whale_position' "
+            "AND COALESCE(json_extract(metadata, '$.action'), 'open') = 'open'"
+        )
 
         async with TaskProgressManager(msg, steps, user.language, title_zh, title_en) as progress:
             await progress.advance()  # Querying data
 
-            sql = (
-                "SELECT timestamp, exchange, symbol, side, amount_usd, price, source, order_type, metadata "
-                f"FROM whale_orders WHERE {where_clause} "
-                "ORDER BY timestamp DESC LIMIT 20"
-            )
-            async with self.db._conn.execute(sql, tuple(params)) as cursor:
-                rows = await cursor.fetchall()
-
-            stat_sql = (
-                "SELECT COUNT(*) as cnt, COALESCE(SUM(amount_usd), 0) as total_usd, "
-                "COALESCE(SUM(CASE WHEN side='buy' THEN amount_usd ELSE 0 END), 0) as buy_usd, "
-                "COALESCE(SUM(CASE WHEN side='sell' THEN amount_usd ELSE 0 END), 0) as sell_usd "
-                f"FROM whale_orders WHERE {where_clause}"
-            )
-            async with self.db._conn.execute(stat_sql, tuple(params)) as cursor:
-                stat = await cursor.fetchone()
-
-            if mode == "large":
-                breakdown_sql = (
-                    "SELECT source, order_type, COUNT(*) as cnt, COALESCE(SUM(amount_usd), 0) as total_usd "
-                    f"FROM whale_orders WHERE {where_clause} "
-                    "GROUP BY source, order_type "
-                    "ORDER BY total_usd DESC"
-                )
-                async with self.db._conn.execute(breakdown_sql, tuple(params)) as cursor:
-                    breakdown_rows = await cursor.fetchall()
-
             await progress.advance()  # Generating answer
 
-        total_count = int(stat["cnt"]) if stat else 0
-        total_usd = float(stat["total_usd"]) if stat else 0.0
-        buy_usd = float(stat["buy_usd"]) if stat else 0.0
-        sell_usd = float(stat["sell_usd"]) if stat else 0.0
-
-        def parse_meta(raw_meta) -> dict:
+        def parse_meta(raw_meta: Any) -> dict[str, Any]:
             if isinstance(raw_meta, dict):
                 return raw_meta
             if isinstance(raw_meta, str):
@@ -590,157 +641,184 @@ class TelegramBot:
                     return {}
             return {}
 
-        if not rows:
-            # If on-chain/spot data is empty, fallback to recent whale events for same symbol.
-            if mode in {"onchain", "spot"}:
-                fallback_params: tuple[object, ...] = (f"%{symbol}%",)
-                fallback_sql = (
-                    "SELECT timestamp, exchange, symbol, side, amount_usd, price, source, order_type, metadata "
-                    "FROM whale_orders WHERE symbol LIKE ? "
-                    "ORDER BY timestamp DESC LIMIT 8"
-                )
-                async with self.db._conn.execute(fallback_sql, fallback_params) as cursor:
-                    fallback_rows = await cursor.fetchall()
+        if mode == "top":
+            window_map = {"1h": 1, "4h": 4, "24h": 24}
+            hours = window_map.get(window, 24)
+            since_ms = int((datetime.now(timezone.utc).timestamp() - hours * 3600) * 1000)
+            sql = (
+                "SELECT timestamp, symbol, side, amount_usd, price, metadata "
+                f"FROM whale_orders WHERE {base_where} AND timestamp >= ? "
+                "ORDER BY amount_usd DESC LIMIT 200"
+            )
+            async with self.db._conn.execute(sql, (since_ms,)) as cursor:
+                rows = await cursor.fetchall()
 
-                if fallback_rows:
-                    fallback_stat_sql = (
-                        "SELECT COUNT(*) as cnt, COALESCE(SUM(amount_usd), 0) as total_usd, "
-                        "COALESCE(SUM(CASE WHEN side='buy' THEN amount_usd ELSE 0 END), 0) as buy_usd, "
-                        "COALESCE(SUM(CASE WHEN side='sell' THEN amount_usd ELSE 0 END), 0) as sell_usd "
-                        "FROM whale_orders WHERE symbol LIKE ?"
-                    )
-                    async with self.db._conn.execute(fallback_stat_sql, fallback_params) as cursor:
-                        fallback_stat = await cursor.fetchone()
-
-                    fallback_count = int(fallback_stat["cnt"]) if fallback_stat else 0
-                    fallback_total = float(fallback_stat["total_usd"]) if fallback_stat else 0.0
-                    fallback_buy = float(fallback_stat["buy_usd"]) if fallback_stat else 0.0
-                    fallback_sell = float(fallback_stat["sell_usd"]) if fallback_stat else 0.0
-
-                    fallback_lines = []
-                    for row in fallback_rows:
-                        ts = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=timezone.utc).strftime("%H:%M:%S")
-                        side = str(row["side"]).upper()
-                        src = str(row["source"])
-                        line = (
-                            f"{ts} | {row['exchange']} {row['symbol']} {side} ${float(row['amount_usd']):,.0f} [{src}]"
-                        )
-                        meta = parse_meta(row["metadata"])
-                        wallet = str(meta.get("wallet") or "").strip()
-                        if wallet:
-                            line += f" | wallet:{wallet}"
-                        fallback_lines.append(line)
-
-                    if mode == "spot":
-                        fallback_hint_en = "Spot order-book data is unavailable with current CoinGlass plan."
-                        fallback_hint_zh = "当前 CoinGlass 套餐下现货盘口大单数据不可用。"
-                    else:
-                        fallback_hint_en = "No on-chain transfer records found for now."
-                        fallback_hint_zh = "当前未采集到链上转账记录。"
-
-                    if user.language == "en":
-                        fallback_result = (
-                            "✅ Payment successful!\n"
-                            f"📭 {fallback_hint_en}\n"
-                            "🔁 Showing latest whale events for the same symbol instead.\n"
-                            f"• Total records: {fallback_count}\n"
-                            f"• Total volume: ${fallback_total:,.0f}\n"
-                            f"• Buy volume: ${fallback_buy:,.0f}\n"
-                            f"• Sell volume: ${fallback_sell:,.0f}\n\n"
-                            "Latest fallback events (UTC):\n"
-                            + "\n".join(fallback_lines)
-                        )
-                    else:
-                        fallback_result = (
-                            "✅ 支付成功！\n"
-                            f"📭 {fallback_hint_zh}\n"
-                            "🔁 已自动回退为同币种最近巨鲸事件。\n"
-                            f"• 总记录数：{fallback_count}\n"
-                            f"• 总成交额：${fallback_total:,.0f}\n"
-                            f"• 买入额：${fallback_buy:,.0f}\n"
-                            f"• 卖出额：${fallback_sell:,.0f}\n\n"
-                            "回退事件（UTC）：\n"
-                            + "\n".join(fallback_lines)
-                        )
-                    await msg.edit_text(fallback_result)
-                    return
-
-            if user.language == "en":
+            if not rows:
                 no_data = (
+                    f"✅ Payment successful!\n📭 No Hyperliquid open records in last {hours}h."
+                    if user.language == "en"
+                    else f"✅ 支付成功！\n📭 最近 {hours} 小时暂无 Hyperliquid 开仓记录。"
+                )
+                await msg.edit_text(no_data)
+                return
+
+            board: dict[tuple[str, str], dict[str, Any]] = {}
+            for row in rows:
+                meta = parse_meta(row["metadata"])
+                w = str(meta.get("wallet") or "unknown")
+                key = (w, row["symbol"])
+                item = board.setdefault(
+                    key,
+                    {
+                        "wallet": w,
+                        "symbol": row["symbol"],
+                        "count": 0,
+                        "total_usd": 0.0,
+                        "max_usd": 0.0,
+                        "latest_ts": 0,
+                    },
+                )
+                usd = float(row["amount_usd"])
+                item["count"] += 1
+                item["total_usd"] += usd
+                item["max_usd"] = max(item["max_usd"], usd)
+                item["latest_ts"] = max(item["latest_ts"], int(row["timestamp"]))
+
+            rank_rows = sorted(board.values(), key=lambda x: x["total_usd"], reverse=True)[:20]
+            lines = []
+            for idx, item in enumerate(rank_rows, start=1):
+                ts = self._safe_utc_hms(item["latest_ts"])
+                lines.append(
+                    f"{idx:02d}. ${item['total_usd']:,.0f} | {item['symbol']} | {item['wallet']} | "
+                    f"{item['count']} opens | max ${item['max_usd']:,.0f} | last {ts}"
+                )
+
+            total_usd = sum(i["total_usd"] for i in rank_rows)
+            if user.language == "en":
+                result = (
                     "✅ Payment successful!\n"
-                    f"📭 No data found for mode={mode}, symbol={symbol}.\n"
-                    "Possible reasons:\n"
-                    "1) Collector has not accumulated data yet\n"
-                    "2) API plan limitation (especially spot/futures)\n"
-                    "3) Symbol has no recent whale events\n"
-                    "Tip: try /query large BTC first."
+                    f"📊 Open leaderboard ({hours}h)\n"
+                    f"• Wallet-symbol pairs: {len(rank_rows)}\n"
+                    f"• Total open notional: ${total_usd:,.0f}\n\n"
+                    "Top board:\n"
+                    + "\n".join(lines)
                 )
             else:
-                no_data = (
+                result = (
                     "✅ 支付成功！\n"
-                    f"📭 当前没有匹配数据（类型={mode}，币种={symbol}）。\n"
-                    "可能原因：\n"
-                    "1) 采集器刚启动，数据尚未积累\n"
-                    "2) API 套餐限制（尤其 spot/futures）\n"
-                    "3) 该币种近期无巨鲸事件\n"
-                    "建议先试：/query large BTC。"
+                    f"📊 开仓排行榜（最近 {hours} 小时）\n"
+                    f"• 钱包-标的对数：{len(rank_rows)}\n"
+                    f"• 总开仓名义价值：${total_usd:,.0f}\n\n"
+                    "排行榜：\n"
+                    + "\n".join(lines)
                 )
+            await msg.edit_text(result)
+            return
+
+        where_clause = base_where
+        params: list[object] = []
+        query_label = symbol
+        if mode == "wallet":
+            if not wallet:
+                err = (
+                    "❌ Wallet is required. Example: /query wallet 0xabc..."
+                    if user.language == "en"
+                    else "❌ 钱包地址不能为空。示例：/query wallet 0xabc..."
+                )
+                await msg.edit_text(err)
+                return
+            where_clause += " AND metadata LIKE ?"
+            params.append(f"%{wallet}%")
+            query_label = wallet
+        else:
+            where_clause += " AND symbol LIKE ?"
+            params.append(f"%{symbol}%")
+
+        stat_sql = (
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(amount_usd), 0) as total_usd, "
+            "COALESCE(SUM(CASE WHEN side='buy' THEN amount_usd ELSE 0 END), 0) as long_usd, "
+            "COALESCE(SUM(CASE WHEN side='sell' THEN amount_usd ELSE 0 END), 0) as short_usd "
+            f"FROM whale_orders WHERE {where_clause}"
+        )
+        async with self.db._conn.execute(stat_sql, tuple(params)) as cursor:
+            stat = await cursor.fetchone()
+
+        total_count = int(stat["cnt"]) if stat else 0
+        total_pages = (total_count + page_size - 1) // page_size if total_count else 1
+        page = min(page, total_pages)
+        offset = (page - 1) * page_size
+
+        sql = (
+            "SELECT timestamp, exchange, symbol, side, amount_usd, price, metadata "
+            f"FROM whale_orders WHERE {where_clause} "
+            "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        )
+        async with self.db._conn.execute(sql, tuple(params + [page_size, offset])) as cursor:
+            rows = await cursor.fetchall()
+
+        if not rows:
+            no_data = (
+                f"✅ Payment successful!\n📭 No Hyperliquid open records for {query_label}."
+                if user.language == "en"
+                else f"✅ 支付成功！\n📭 未找到 {query_label} 对应的 Hyperliquid 开仓记录。"
+            )
             await msg.edit_text(no_data)
             return
 
-        latest_lines = []
-        for row in rows[:8]:
-            ts = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=timezone.utc).strftime("%H:%M:%S")
-            side = str(row["side"]).upper()
-            line = f"{ts} | {row['exchange']} {row['symbol']} {side} ${float(row['amount_usd']):,.0f}"
-            if mode == "large":
-                meta = parse_meta(row["metadata"])
-                wallet = str(meta.get("wallet") or "").strip()
-                action = str(meta.get("action") or "").strip()
-                if wallet:
-                    action_suffix = f" ({action})" if action else ""
-                    line += f" | wallet:{wallet}{action_suffix}"
-            latest_lines.append(line)
+        total_usd = float(stat["total_usd"]) if stat else 0.0
+        long_usd = float(stat["long_usd"]) if stat else 0.0
+        short_usd = float(stat["short_usd"]) if stat else 0.0
 
-        breakdown_lines = []
-        if mode == "large":
-            for item in breakdown_rows[:6]:
-                breakdown_lines.append(
-                    f"- {item['source']} / {item['order_type']}: {int(item['cnt'])} records, ${float(item['total_usd']):,.0f}"
-                )
+        latest_lines = []
+        for row in rows:
+            ts = self._safe_utc_hms(int(row["timestamp"]))
+            side = "LONG" if str(row["side"]).lower() == "buy" else "SHORT"
+            meta = parse_meta(row["metadata"])
+            row_wallet = str(meta.get("wallet") or "")
+            latest_lines.append(
+                f"{ts} | {row['symbol']} {side} ${float(row['amount_usd']):,.0f} @ ${float(row['price']):,.2f} | {row_wallet}"
+            )
+
+        nav_tip = ""
+        if user.language == "en":
+            if page > 1:
+                nav_tip += f"\nPrev: /query {mode} {query_label} {page - 1}"
+            if page < total_pages:
+                nav_tip += f"\nNext: /query {mode} {query_label} {page + 1}"
+        else:
+            if page > 1:
+                nav_tip += f"\n上一页：/query {mode} {query_label} {page - 1}"
+            if page < total_pages:
+                nav_tip += f"\n下一页：/query {mode} {query_label} {page + 1}"
 
         if user.language == "en":
             result = (
                 "✅ Payment successful!\n"
-                f"📊 Query done: {mode_name} ({symbol})\n"
+                f"📊 Query done: {mode_name} ({query_label})\n"
                 f"• Total records: {total_count}\n"
-                f"• Total volume: ${total_usd:,.0f}\n"
-                f"• Buy volume: ${buy_usd:,.0f}\n"
-                f"• Sell volume: ${sell_usd:,.0f}\n"
-            )
-            if breakdown_lines:
-                result += "\nSource breakdown:\n" + "\n".join(breakdown_lines)
-            result += (
-                "\n\n"
-                "Latest events (UTC):\n"
+                f"• Total open notional: ${total_usd:,.0f}\n"
+                f"• LONG open notional: ${long_usd:,.0f}\n"
+                f"• SHORT open notional: ${short_usd:,.0f}\n"
+                f"• Page: {page}/{total_pages} (size {page_size})\n\n"
+                "Latest opens (UTC):\n"
                 + "\n".join(latest_lines)
             )
+            if nav_tip:
+                result += "\n\nPagination:" + nav_tip
         else:
             result = (
                 "✅ 支付成功！\n"
-                f"📊 查询完成：{mode_name}（{symbol}）\n"
+                f"📊 查询完成：{mode_name}（{query_label}）\n"
                 f"• 总记录数：{total_count}\n"
-                f"• 总成交额：${total_usd:,.0f}\n"
-                f"• 买入额：${buy_usd:,.0f}\n"
-                f"• 卖出额：${sell_usd:,.0f}\n"
-            )
-            if breakdown_lines:
-                result += "\n来源明细：\n" + "\n".join(breakdown_lines)
-            result += (
-                "\n\n"
-                "最新事件（UTC）：\n"
+                f"• 总开仓名义价值：${total_usd:,.0f}\n"
+                f"• LONG 开仓额：${long_usd:,.0f}\n"
+                f"• SHORT 开仓额：${short_usd:,.0f}\n"
+                f"• 页码：{page}/{total_pages}（每页 {page_size} 条）\n\n"
+                "最新开仓（UTC）：\n"
                 + "\n".join(latest_lines)
             )
+            if nav_tip:
+                result += "\n\n分页：" + nav_tip
         await msg.edit_text(result)
 
     async def _query_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -755,8 +833,11 @@ class TelegramBot:
             return
 
         query_request = self._parse_query_request(update, context)
-        mode = query_request["mode"]
-        symbol = query_request["symbol"]
+        mode = str(query_request["mode"])
+        symbol = str(query_request["symbol"])
+        wallet = str(query_request.get("wallet", ""))
+        window = str(query_request.get("window", "24h"))
+        page = int(query_request.get("page", 1) or 1)
         mode_name, price = self._query_meta(mode, user.language)
         context.user_data["pending_query_request"] = query_request
 
@@ -766,25 +847,71 @@ class TelegramBot:
         ])
 
         if user.language == "en":
+            target = symbol
+            if mode == "wallet":
+                target = wallet or "N/A"
+            elif mode == "top":
+                target = window
             msg = (
                 "🧾 **Virtual Invoice**\n\n"
                 f"Target Job: **📊 {mode_name}**\n"
-                f"Symbol: **{symbol}**\n"
+                f"Target: **{target}**\n"
+                f"Page: **{page}**\n"
                 f"Total Cost: **${price:.2f}**\n\n"
                 "Please click the button below to execute the query:"
             )
         else:
+            target = symbol
+            if mode == "wallet":
+                target = wallet or "N/A"
+            elif mode == "top":
+                target = window
             msg = (
                 "🧾 **虚拟账单**\n\n"
                 f"您选择了服务：**📊 {mode_name}**\n"
-                f"查询币种：**{symbol}**\n"
+                f"查询目标：**{target}**\n"
+                f"查询页码：**{page}**\n"
                 f"服务费用：**${price:.2f}**\n\n"
                 "请点击下方按钮完成支付并开始查询："
             )
         await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
 
+    def _parse_export_request(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> dict[str, str]:
+        tokens: list[str] = []
+        if context.args:
+            tokens = [t.strip() for t in context.args if t.strip()]
+        elif update.message and update.message.text:
+            parts = update.message.text.strip().split()
+            if parts:
+                head = parts[0].lower()
+                if head in {"/export", "export", "导出"}:
+                    tokens = parts[1:]
+                else:
+                    tokens = parts
+
+        symbol = "BTC"
+        range_key = "7d"
+        symbol_set = False
+        for tok in tokens:
+            t = tok.lower()
+            if t in {"open", "开仓"}:
+                continue
+            if t in {"1d", "7d", "30d"}:
+                range_key = t
+                continue
+            if not symbol_set:
+                symbol = tok
+                symbol_set = True
+
+        symbol = re.sub(r"[^A-Za-z0-9_-]", "", symbol.upper()) or "BTC"
+        return {"symbol": symbol, "range_key": range_key}
+
     async def _export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /export command — show exchange picker before exporting."""
+        """Handle /export command for Hyperliquid open-position export."""
         user_id = update.effective_user.id
         user = await self.user_manager.get_user(user_id)
         if not user:
@@ -795,42 +922,34 @@ class TelegramBot:
             await update.message.reply_text(msg, parse_mode="Markdown")
             return
 
-        # Parse symbol from args (default BTC)
-        symbol_filter = "BTC"
-        if context.args and len(context.args) > 0:
-            symbol_filter = context.args[0].upper()
-        elif update.message and update.message.text:
-            parts = update.message.text.strip().split()
-            if len(parts) > 1:
-                symbol_filter = parts[1].upper()
-        symbol_filter = re.sub(r"[^A-Za-z0-9_-]", "", symbol_filter) or "BTC"
+        export_request = self._parse_export_request(update, context)
+        symbol_filter = export_request["symbol"]
+        range_key = export_request["range_key"]
+        range_label, _ = self._export_range_meta(range_key, user.language)
+        context.user_data["pending_export_request"] = export_request
 
-        # Show exchange picker
+        btn_text = "💳 Pay $0.80" if user.language == "en" else "💳 确认支付 $0.80"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data="pay_job_export")]])
+
         if user.language == "en":
-            msg = f"📥 **Export {symbol_filter} Whale Orders**\n\nStep 1/2: Please select the exchange:"
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_pick_{symbol_filter}_Hyperliquid"),
-                    InlineKeyboardButton("Binance", callback_data=f"export_pick_{symbol_filter}_Binance"),
-                ],
-                [
-                    InlineKeyboardButton("OKX", callback_data=f"export_pick_{symbol_filter}_OKX"),
-                    InlineKeyboardButton("🌐 All Exchanges", callback_data=f"export_pick_{symbol_filter}_ALL"),
-                ]
-            ])
+            text = (
+                "🧾 **Virtual Invoice**\n\n"
+                "Target Job: **📥 Export Hyperliquid Open Records**\n"
+                f"Symbol: **{symbol_filter}**\n"
+                f"Range: **{range_label}**\n"
+                "Source: **Hyperliquid only**\n"
+                "Total Cost: **$0.80**"
+            )
         else:
-            msg = f"📥 **导出 {symbol_filter} 巨鲸订单**\n\n步骤 1/2：请选择交易所："
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Hyperliquid", callback_data=f"export_pick_{symbol_filter}_Hyperliquid"),
-                    InlineKeyboardButton("Binance", callback_data=f"export_pick_{symbol_filter}_Binance"),
-                ],
-                [
-                    InlineKeyboardButton("OKX", callback_data=f"export_pick_{symbol_filter}_OKX"),
-                    InlineKeyboardButton("🌐 全部交易所", callback_data=f"export_pick_{symbol_filter}_ALL"),
-                ]
-            ])
-        await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
+            text = (
+                "🧾 **虚拟账单**\n\n"
+                "您选择了服务：**📥 导出 Hyperliquid 开仓记录**\n"
+                f"币种：**{symbol_filter}**\n"
+                f"时间范围：**{range_label}**\n"
+                "数据源：**Hyperliquid 开仓数据**\n"
+                "服务费用：**$0.80**"
+            )
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
     def _export_range_meta(self, range_key: str, language: str) -> tuple[str, int]:
         """Get export range label and day span."""
@@ -844,136 +963,132 @@ class TelegramBot:
 
     async def _do_export(
         self,
-        query,
+        msg,
         user,
         symbol_filter: str,
-        exchange_filter: str,
         range_key: str = "7d",
     ) -> None:
-        """Actually perform the CSV+JSON export after exchange selection."""
+        """Export Hyperliquid whale open records as CSV+JSON."""
         if not self.db or not hasattr(self.db, '_conn') or self.db._conn is None:
-            msg = "❌ Database not available." if user.language == "en" else "❌ 数据库尚未就绪，请稍后重试。"
-            await query.edit_message_text(msg)
+            err = "❌ Database not available." if user.language == "en" else "❌ 数据库尚未就绪，请稍后重试。"
+            await msg.edit_text(err)
             return
 
-        exchange_label = exchange_filter if exchange_filter != "ALL" else ("All Exchanges" if user.language == "en" else "全部交易所")
         range_label, days = self._export_range_meta(range_key, user.language)
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         since_ms = now_ms - days * 24 * 60 * 60 * 1000
-
-        msg = query.message
         steps = export_steps()
-        title_zh = f"导出 {symbol_filter} — {exchange_label} — {range_label}"
-        title_en = f"Export {symbol_filter} — {exchange_label} — {range_label}"
-
-        # Initial placeholder (will be immediately overwritten by progress manager)
-        await query.edit_message_text("⏳")
+        title_zh = f"导出 Hyperliquid 开仓 {symbol_filter} {range_label}"
+        title_en = f"Export Hyperliquid opens {symbol_filter} {range_label}"
 
         try:
-            # Query data first to check if we have results before showing progress
-            if exchange_filter == "ALL":
-                sql = (
-                    "SELECT * FROM whale_orders "
-                    "WHERE symbol LIKE ? AND timestamp >= ? "
-                    "ORDER BY timestamp DESC LIMIT 3000"
-                )
-                params = (f"%{symbol_filter}%", since_ms)
-            else:
-                sql = (
-                    "SELECT * FROM whale_orders "
-                    "WHERE symbol LIKE ? AND exchange = ? AND timestamp >= ? "
-                    "ORDER BY timestamp DESC LIMIT 3000"
-                )
-                params = (f"%{symbol_filter}%", exchange_filter, since_ms)
-
-            async with self.db._conn.execute(sql, params) as cursor:
+            sql = (
+                "SELECT * FROM whale_orders "
+                "WHERE source='dex_hyperliquid' AND order_type='whale_position' "
+                "AND COALESCE(json_extract(metadata, '$.action'), 'open')='open' "
+                "AND symbol LIKE ? AND timestamp >= ? "
+                "ORDER BY timestamp DESC LIMIT 5000"
+            )
+            async with self.db._conn.execute(sql, (f"%{symbol_filter}%", since_ms)) as cursor:
                 rows = await cursor.fetchall()
 
             if not rows:
-                if user.language == "en":
-                    no_data = f"📭 No {symbol_filter} orders found on {exchange_label} in the last {range_label}."
-                else:
-                    no_data = f"📭 最近{range_label}内，{exchange_label} 上暂无 {symbol_filter} 相关订单。"
+                no_data = (
+                    f"📭 No Hyperliquid open records for {symbol_filter} in last {range_label}."
+                    if user.language == "en"
+                    else f"📭 最近{range_label}内暂无 {symbol_filter} 的 Hyperliquid 开仓记录。"
+                )
                 await msg.edit_text(no_data)
                 return
 
             records = [dict(r) for r in rows]
             today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
-            suffix = exchange_filter if exchange_filter != "ALL" else "ALL"
-            range_suffix = range_key
+            csv_fn = f"hyperliquid_open_{symbol_filter}_{range_key}_{today_str}.csv"
+            json_fn = f"hyperliquid_open_{symbol_filter}_{range_key}_{today_str}.json"
 
             async with TaskProgressManager(msg, steps, user.language, title_zh, title_en) as progress:
-                # Step 0: Query complete, advance to CSV generation
-                await progress.advance()  # → Step 1: Generating CSV
+                await progress.advance()
 
-                # Step 1: CSV
                 csv_buf = io.StringIO()
-                cols = ["timestamp", "exchange", "symbol", "side", "price", "amount_usd", "quantity", "order_type", "status", "source"]
+                cols = [
+                    "timestamp", "exchange", "symbol", "side", "price", "amount_usd",
+                    "quantity", "order_type", "status", "source", "wallet", "action"
+                ]
                 writer = csv.DictWriter(csv_buf, fieldnames=cols, extrasaction="ignore")
                 writer.writeheader()
                 for rec in records:
                     rc = dict(rec)
-                    ts = rc.get("timestamp", 0)
-                    if ts:
+                    ts = int(rc.get("timestamp", 0) or 0)
+                    if ts > 0:
                         rc["timestamp"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    meta = rc.get("metadata")
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except json.JSONDecodeError:
+                            meta = {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    rc["wallet"] = meta.get("wallet", "")
+                    rc["action"] = meta.get("action", "open")
                     writer.writerow(rc)
                 csv_bytes = csv_buf.getvalue().encode("utf-8")
-                csv_fn = f"whale_orders_{symbol_filter}_{suffix}_{range_suffix}_{today_str}.csv"
 
-                await progress.advance()  # → Step 2: Generating JSON
+                await progress.advance()
 
-                # Step 2: JSON
-                jrs = []
+                json_rows = []
                 for rec in records:
                     jr = dict(rec)
-                    ts = jr.get("timestamp", 0)
-                    if ts:
+                    ts = int(jr.get("timestamp", 0) or 0)
+                    if ts > 0:
                         jr["timestamp_utc"] = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                     if isinstance(jr.get("metadata"), str):
                         try:
                             jr["metadata"] = json.loads(jr["metadata"])
                         except json.JSONDecodeError:
-                            pass
-                    jrs.append(jr)
-                json_bytes = json.dumps(jrs, ensure_ascii=False, indent=2).encode("utf-8")
-                json_fn = f"whale_orders_{symbol_filter}_{suffix}_{range_suffix}_{today_str}.json"
+                            jr["metadata"] = {}
+                    json_rows.append(jr)
 
-                await progress.advance()  # → Step 3: Sending files
+                json_payload = {
+                    "source": "coinglass_hyperliquid_whale_alert",
+                    "scope": "open_positions_only",
+                    "symbol_filter": symbol_filter,
+                    "range": range_key,
+                    "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "count": len(json_rows),
+                    "records": json_rows,
+                }
+                json_bytes = json.dumps(json_payload, ensure_ascii=False, indent=2).encode("utf-8")
 
-                # Step 3: Send files
+                await progress.advance()
+
                 if user.language == "en":
                     caption = (
-                        f"📊 **{symbol_filter} Whale Orders — {exchange_label}**\n\n"
+                        f"📊 **Hyperliquid Open Export — {symbol_filter}**\n\n"
                         f"Range: **{range_label}**\n"
                         f"Records: **{len(records)}**\n"
-                        "Format: CSV + JSON"
+                        "Scope: **Open positions only**"
                     )
                 else:
                     caption = (
-                        f"📊 **{symbol_filter} 巨鲸订单 — {exchange_label}**\n\n"
+                        f"📊 **Hyperliquid 开仓导出 — {symbol_filter}**\n\n"
                         f"时间范围: **{range_label}**\n"
                         f"记录数: **{len(records)}**\n"
-                        "格式: CSV + JSON"
+                        "范围: **开仓事件数据**"
                     )
 
-                await msg.reply_document(
-                    document=io.BytesIO(csv_bytes), filename=csv_fn, caption=caption, parse_mode="Markdown"
-                )
-                await msg.reply_document(
-                    document=io.BytesIO(json_bytes), filename=json_fn
-                )
+                await msg.reply_document(document=io.BytesIO(csv_bytes), filename=csv_fn, caption=caption, parse_mode="Markdown")
+                await msg.reply_document(document=io.BytesIO(json_bytes), filename=json_fn)
 
-            # Overwrite with final summary
             done_msg = (
-                f"✅ {len(records)} records exported ({range_label})."
+                f"✅ Exported {len(records)} Hyperliquid open records."
                 if user.language == "en"
-                else f"✅ 已导出 {len(records)} 条记录（{range_label}）。"
+                else f"✅ 已导出 {len(records)} 条 Hyperliquid 开仓记录。"
             )
             try:
                 await msg.edit_text(done_msg)
             except Exception:
                 pass
-
         except Exception as e:
             logger.error("Export failed: %s", e, exc_info=True)
             try:
@@ -1074,6 +1189,79 @@ class TelegramBot:
                             })
                         data_context["recent_5_orders"] = recent_summary
 
+                    # Build wallet-risk context for questions like
+                    # "which wallet is easiest to liquidate / at what price".
+                    ts_24h_ago = int((datetime.now(timezone.utc).timestamp() - 24 * 3600) * 1000)
+                    async with self.db._conn.execute(
+                        """SELECT symbol, side, price, amount_usd, timestamp, metadata
+                           FROM whale_orders
+                           WHERE timestamp > ?
+                           ORDER BY timestamp DESC
+                           LIMIT 500""",
+                        (ts_24h_ago,),
+                    ) as cur:
+                        risk_rows = await cur.fetchall()
+
+                    wallet_totals: dict[str, float] = {}
+                    near_liq: list[dict[str, Any]] = []
+                    latest_symbol_price: dict[str, float] = {}
+
+                    for r in risk_rows:
+                        d = dict(r)
+                        symbol = str(d.get("symbol") or "")
+                        try:
+                            price = float(d.get("price") or 0)
+                        except (TypeError, ValueError):
+                            price = 0.0
+
+                        if symbol and price > 0 and symbol not in latest_symbol_price:
+                            latest_symbol_price[symbol] = round(price, 4)
+
+                        try:
+                            metadata = json.loads(d.get("metadata") or "{}")
+                            if not isinstance(metadata, dict):
+                                metadata = {}
+                        except Exception:
+                            metadata = {}
+
+                        wallet = str(metadata.get("wallet") or "").strip()
+                        amount_usd = float(d.get("amount_usd") or 0)
+                        if wallet:
+                            wallet_totals[wallet] = wallet_totals.get(wallet, 0.0) + amount_usd
+
+                        liq_raw = metadata.get("liq_price")
+                        if not wallet or liq_raw in (None, "", 0) or price <= 0:
+                            continue
+                        try:
+                            liq_price = float(liq_raw)
+                        except (TypeError, ValueError):
+                            continue
+                        if liq_price <= 0:
+                            continue
+
+                        near_liq.append(
+                            {
+                                "wallet": wallet,
+                                "symbol": symbol,
+                                "side": d.get("side"),
+                                "entry_price": round(price, 4),
+                                "liq_price": round(liq_price, 4),
+                                "liq_distance_pct": round(abs(price - liq_price) / price * 100, 4),
+                                "amount_usd": round(amount_usd, 2),
+                                "leverage": metadata.get("leverage"),
+                                "timestamp": d.get("timestamp"),
+                            }
+                        )
+
+                    near_liq.sort(key=lambda x: (x["liq_distance_pct"], -x["amount_usd"]))
+                    top_exposure = sorted(wallet_totals.items(), key=lambda kv: kv[1], reverse=True)
+                    data_context["latest_observed_price"] = latest_symbol_price
+                    data_context["top_wallet_exposure_24h"] = [
+                        {"wallet": wallet, "total_amount_usd": round(total, 2)}
+                        for wallet, total in top_exposure[:8]
+                    ]
+                    data_context["wallets_near_liquidation"] = near_liq[:8]
+
                 await progress.advance()  # → Step 2: AI analyzing
 
                 # Step 2: Call Deepseek AI (longest step, auto-pulse animates)
@@ -1082,11 +1270,13 @@ class TelegramBot:
 
                 await progress.advance()  # → Step 3: Formatting results
 
-            # Context manager exits with "completed" — overwrite with final result
+            # Context manager exits with "completed" — overwrite with final result.
+            # Use plain text to avoid Telegram Markdown parse errors on AI output.
+            final_text = f"🤖 AI Analysis\n\n{response}"
             try:
-                await progress_msg.edit_text(f"🤖 **AI Analysis**\n\n{response}", parse_mode="Markdown")
+                await progress_msg.edit_text(final_text)
             except Exception:
-                await update.message.reply_text(f"🤖 **AI Analysis**\n\n{response}", parse_mode="Markdown")
+                await update.message.reply_text(final_text)
 
         except Exception as e:
             logger.error("AI ask failed: %s", e, exc_info=True)
@@ -1094,18 +1284,6 @@ class TelegramBot:
                 await progress_msg.edit_text(f"❌ AI analysis failed: {e}" if user.language == "en" else f"❌ AI 分析失败: {e}")
             except Exception:
                 await update.message.reply_text(f"❌ AI analysis failed: {e}" if user.language == "en" else f"❌ AI 分析失败: {e}")
-
-    async def _buy_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._execute_dummy_job(update, "buy", "Copy Buy", "跟单买入", 1.00)
-
-    async def _sell_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._execute_dummy_job(update, "sell", "Copy Sell", "跟单卖出", 1.00)
-
-    async def _positions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._execute_dummy_job(update, "positions", "Check Positions", "查询持仓", 0.10)
-
-    async def _balance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._execute_dummy_job(update, "balance", "Check Balance", "查询余额", 0.10)
 
     # ==================== Admin Commands ====================
 
@@ -1211,44 +1389,6 @@ class TelegramBot:
             await query.edit_message_text(msg)
             return
 
-        # Export flow step 1: exchange selection callback: export_pick_{SYMBOL}_{EXCHANGE}
-        if data.startswith("export_pick_"):
-            parts = data.split("_", 3)  # ['export', 'pick', 'BTC', 'Hyperliquid']
-            if len(parts) >= 4:
-                symbol_filter = parts[2]
-                exchange_filter = parts[3]
-                exchange_label = exchange_filter if exchange_filter != "ALL" else ("All Exchanges" if user.language == "en" else "全部交易所")
-                if user.language == "en":
-                    msg_text = (
-                        f"📥 **Export {symbol_filter} — {exchange_label}**\n\n"
-                        "Step 2/2: Please choose the time range:"
-                    )
-                else:
-                    msg_text = (
-                        f"📥 **导出 {symbol_filter} — {exchange_label}**\n\n"
-                        "步骤 2/2：请选择时间范围："
-                    )
-                keyboard = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("1 Day" if user.language == "en" else "1天", callback_data=f"export_do_{symbol_filter}_{exchange_filter}_1d"),
-                        InlineKeyboardButton("7 Days" if user.language == "en" else "7天", callback_data=f"export_do_{symbol_filter}_{exchange_filter}_7d"),
-                        InlineKeyboardButton("1 Month" if user.language == "en" else "1个月", callback_data=f"export_do_{symbol_filter}_{exchange_filter}_30d"),
-                    ]
-                ])
-                await query.edit_message_text(msg_text, reply_markup=keyboard, parse_mode="Markdown")
-            return
-
-        # Export flow step 2: execute export callback: export_do_{SYMBOL}_{EXCHANGE}_{RANGE}
-        if data.startswith("export_do_"):
-            parts = data.split("_", 4)  # ['export', 'do', 'BTC', 'Hyperliquid', '7d']
-            if len(parts) >= 4:
-                symbol_filter = parts[2]
-                exchange_filter = parts[3]
-                range_key = parts[4] if len(parts) >= 5 else "7d"
-                await self._do_export(query, user, symbol_filter, exchange_filter, range_key)
-            return
-
-
         elif data.startswith("pay_job_"):
             if not user.is_active:
                 await query.answer(
@@ -1260,11 +1400,7 @@ class TelegramBot:
             job_types = {
                 "pay_job_query": ("📊 Data Query", "📊 数据查询"),
                 "pay_job_ai": ("🤖 AI Analysis", "🤖 AI 深度分析"),
-                "pay_job_export": ("📥 Export Real Data", "📥 导出真实数据"),
-                "pay_job_buy": ("📈 Copy Buy", "📈 跟单买入"),
-                "pay_job_sell": ("📉 Copy Sell", "📉 跟单卖出"),
-                "pay_job_positions": ("💼 Check Positions", "💼 查询持仓"),
-                "pay_job_balance": ("💰 Check Balance", "💰 查询余额")
+                "pay_job_export": ("📥 Export Open Data", "📥 导出开仓数据"),
             }
             if data in job_types:
                 names = job_types[data]
@@ -1291,10 +1427,24 @@ class TelegramBot:
                     # Real data path for /query after payment confirmation.
                     if data == "pay_job_query":
                         query_request = context.user_data.pop("pending_query_request", {
-                            "mode": "large",
+                            "mode": "open",
                             "symbol": "BTC",
+                            "wallet": "",
+                            "window": "24h",
+                            "page": 1,
                         })
                         await self._do_query(pay_msg, user, query_request)
+                    elif data == "pay_job_export":
+                        export_request = context.user_data.pop("pending_export_request", {
+                            "symbol": "BTC",
+                            "range_key": "7d",
+                        })
+                        await self._do_export(
+                            pay_msg,
+                            user,
+                            str(export_request.get("symbol", "BTC")),
+                            str(export_request.get("range_key", "7d")),
+                        )
                     else:
                         if user.language == "en":
                             done = (
@@ -1318,84 +1468,74 @@ class TelegramBot:
                 user_id, subscribed_exchanges=[]
             )
 
-        elif data == "sub_binance":
+        elif data == "sub_hyperliquid":
             exchanges = user.subscribed_exchanges or []
-            if "Binance" in exchanges:
-                exchanges = [e for e in exchanges if e != "Binance"]
+            if "Hyperliquid" in exchanges:
+                exchanges = [e for e in exchanges if e != "Hyperliquid"]
             else:
-                exchanges.append("Binance")
+                exchanges.append("Hyperliquid")
             await self.user_manager.update_subscription(
                 user_id, subscribed_exchanges=exchanges
             )
 
-        elif data == "sub_okx":
-            exchanges = user.subscribed_exchanges or []
-            if "OKX" in exchanges:
-                exchanges = [e for e in exchanges if e != "OKX"]
-            else:
-                exchanges.append("OKX")
-            await self.user_manager.update_subscription(
-                user_id, subscribed_exchanges=exchanges
+        elif data == "sub_toggle_push":
+            await self.user_manager.update_push_preferences(
+                user_id,
+                alerts_enabled=not user.alerts_enabled,
             )
 
-        elif data == "sub_bybit":
-            exchanges = user.subscribed_exchanges or []
-            if "Bybit" in exchanges:
-                exchanges = [e for e in exchanges if e != "Bybit"]
-            else:
-                exchanges.append("Bybit")
-            await self.user_manager.update_subscription(
-                user_id, subscribed_exchanges=exchanges
+        elif data == "sub_channel_dm":
+            await self.user_manager.update_push_preferences(
+                user_id,
+                alerts_enabled=True,
+                push_channel="dm",
             )
+
+        elif data == "sub_channel_group":
+            group_id = None
+            if query.message and query.message.chat.type in {"group", "supergroup"}:
+                group_id = query.message.chat.id
+            await self.user_manager.update_push_preferences(
+                user_id,
+                alerts_enabled=True,
+                push_channel="group",
+                push_group_chat_id=group_id,
+            )
+            if not group_id:
+                await query.answer("请将 Bot 拉进目标群，并在群里发送 /bindgroup 完成绑定。", show_alert=True)
+
+        elif data == "sub_channel_webhook":
+            context.user_data["awaiting_webhook_input"] = True
+            context.user_data.pop("awaiting_threshold_input", None)
+            await self.user_manager.update_push_preferences(
+                user_id,
+                alerts_enabled=True,
+                push_channel="webhook",
+            )
+            await query.edit_message_text(
+                "请发送自定义 Webhook 链接（必须以 http:// 或 https:// 开头）。\n"
+                "例如：`https://example.com/hooks/whale`\n\n"
+                "发送 `cancel` 可取消。",
+                parse_mode="Markdown",
+            )
+            return
 
         elif data == "sub_threshold":
-            # TODO: Implement threshold setting dialog
+            context.user_data["awaiting_threshold_input"] = True
+            context.user_data.pop("awaiting_webhook_input", None)
             await query.edit_message_text(
-                "请输入新的金额阈值（美元），例如: 500000"
+                "请输入新的金额阈值（美元），例如: `500000`\n发送 `cancel` 可取消。",
+                parse_mode="Markdown",
             )
             return
 
         # Update the keyboard
         user = await self.user_manager.get_user(user_id)
-        current_exchanges = (
-            ", ".join(user.subscribed_exchanges)
-            if user.subscribed_exchanges
-            else "全部"
-        )
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    f"{'✅ ' if 'Binance' in (user.subscribed_exchanges or []) else ''}Binance",
-                    callback_data="sub_binance",
-                ),
-                InlineKeyboardButton(
-                    f"{'✅ ' if 'OKX' in (user.subscribed_exchanges or []) else ''}OKX",
-                    callback_data="sub_okx",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    f"{'✅ ' if 'Bybit' in (user.subscribed_exchanges or []) else ''}Bybit",
-                    callback_data="sub_bybit",
-                ),
-                InlineKeyboardButton(
-                    f"{'✅ ' if not user.subscribed_exchanges else ''}全部",
-                    callback_data="sub_all",
-                ),
-            ],
-            [
-                InlineKeyboardButton("设置金额阈值", callback_data="sub_threshold"),
-                InlineKeyboardButton("完成", callback_data="sub_done"),
-            ],
-        ])
+        keyboard = self._build_subscribe_keyboard(user)
 
         try:
             await query.edit_message_text(
-                f"*订阅设置*\n\n"
-                f"当前订阅的交易所: {current_exchanges}\n"
-                f"当前金额阈值: ${user.min_alert_threshold:,.0f}\n\n"
-                f"请选择要订阅的交易所或设置金额阈值:",
+                self._build_subscribe_text(user),
                 reply_markup=keyboard,
                 parse_mode="Markdown",
             )
@@ -1419,18 +1559,48 @@ class TelegramBot:
 
         await self.user_manager.update_activity(user_id)
 
-        # Handle threshold setting
-        if re.match(r"^\d+$", text.strip()):
-            new_threshold = float(text.strip())
+        normalized = text.strip()
+        lowered = normalized.lower()
+
+        # Handle subscription threshold input flow.
+        if context.user_data.get("awaiting_threshold_input"):
+            if lowered in {"cancel", "取消"}:
+                context.user_data.pop("awaiting_threshold_input", None)
+                await update.message.reply_text("已取消金额阈值设置。")
+                return
+            if not re.fullmatch(r"\d+(?:\.\d+)?", normalized):
+                await update.message.reply_text("请输入纯数字金额，例如 500000，或发送 cancel 取消。")
+                return
+            new_threshold = float(normalized)
             await self.user_manager.update_subscription(
                 user_id, min_alert_threshold=new_threshold
             )
+            context.user_data.pop("awaiting_threshold_input", None)
+            await update.message.reply_text(f"✅ 金额阈值已更新为 ${new_threshold:,.0f}")
+            return
+
+        # Handle custom webhook input flow.
+        if context.user_data.get("awaiting_webhook_input"):
+            if lowered in {"cancel", "取消"}:
+                context.user_data.pop("awaiting_webhook_input", None)
+                await update.message.reply_text("已取消 Webhook 设置。")
+                return
+            if not re.match(r"^https?://", normalized, re.IGNORECASE):
+                await update.message.reply_text("Webhook 链接格式无效，请以 http:// 或 https:// 开头，或发送 cancel 取消。")
+                return
+            await self.user_manager.update_push_preferences(
+                user_id,
+                alerts_enabled=True,
+                push_channel="webhook",
+                custom_webhook_url=normalized,
+            )
+            context.user_data.pop("awaiting_webhook_input", None)
             await update.message.reply_text(
-                f"✅ 金额阈值已更新为 ${new_threshold:,.0f}"
+                f"✅ Webhook 已保存：{self._mask_webhook(normalized)}\n后续预警将推送到该链接。"
             )
             return
 
-        text_lower = text.strip().lower()
+        text_lower = lowered
         if text_lower.startswith("query") or text_lower.startswith("查询"):
             await self._query_command(update, context)
             return
@@ -1439,18 +1609,6 @@ class TelegramBot:
             return
         elif text_lower.startswith("ask") or text_lower.startswith("分析"):
             await self._ask_command(update, context)
-            return
-        elif text_lower.startswith("buy") or text_lower.startswith("买入"):
-            await self._buy_command(update, context)
-            return
-        elif text_lower.startswith("sell") or text_lower.startswith("卖出"):
-            await self._sell_command(update, context)
-            return
-        elif text_lower.startswith("positions") or text_lower.startswith("position") or text_lower.startswith("持仓"):
-            await self._positions_command(update, context)
-            return
-        elif text_lower.startswith("balance") or text_lower.startswith("余额"):
-            await self._balance_command(update, context)
             return
 
         # Use dialog handler for natural language queries

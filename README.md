@@ -1,7 +1,7 @@
 # BTC WhaleScope Agent
 
-一个面向 BTC 巨鲸行为监控的自动化 Agent：
-- 实时采集 CoinGlass 多源数据（CEX 大额单、清算、Hyperliquid、链上转账）
+一个面向 Hyperliquid 鲸鱼开仓监控的自动化 Agent：
+- 实时采集 CoinGlass Hyperliquid Whale Alert（仅开仓事件）
 - 统一聚合、去重、规则告警、持久化
 - 通过 Telegram Bot 提供订阅推送、数据查询、导出与 AI 分析
 - 同时提供 HTTP + WebSocket 接口，方便二次集成
@@ -9,31 +9,24 @@
 ## 1. 当前版本能力（与代码一致）
 
 ### 数据采集
-- `FuturesLargeOrderCollector`：CEX 合约大额限价单（默认阈值 `$500,000`）
-- `SpotLargeOrderCollector`：CEX 现货大额限价单（默认阈值 `$500,000`）
-- `LiquidationCollector`：清算订单（默认阈值 `$100,000`）
-- `HyperliquidWhaleCollector`：Hyperliquid 鲸鱼仓位异动（BTC）
-- `OnchainTransferCollector`：交易所链上转账（默认使用 `LARGE_ORDER_THRESHOLD`）
-- `CoinGlassWSClient`：订阅 `liquidationOrders` / `tradeOrders`（当前实际消费 `liquidationOrders`）
+- `HyperliquidWhaleCollector`：Hyperliquid 鲸鱼开仓事件（CoinGlass Startup API）
 
 ### 引擎与告警
 - `Aggregator` 负责：去重、入库、规则匹配、触发推送
 - 默认告警规则（`src/engine/alert_rules.py`）：
-  - `mega_whale`：`>= $5,000,000`
-  - `large_cex_order`：CEX 大单 `>= $1,000,000`
-  - `large_liquidation`：清算 `>= $500,000`
-  - `hyperliquid_whale`：Hyperliquid `>= $1,000,000`
-  - `large_onchain`：链上 `>= $10,000,000`
+  - `hyperliquid_open_standard`：开仓 `>= $1,000,000`
+  - `hyperliquid_open_focus`：开仓 `>= $5,000,000`
+  - `hyperliquid_open_mega`：开仓 `>= $10,000,000`
 
 ### Telegram Bot
 - 用户命令：`/start` `/help` `/language` `/subscribe` `/status` `/stats`
-- 任务命令：`/query` `/export` `/ask` `/buy` `/sell` `/positions` `/balance`
+- 任务命令：`/query` `/export` `/ask`
 - 管理员命令：`/approve` `/revoke` `/users`
 - 特性：
   - 邀请码激活（`/start Ocean1`）
-  - 订阅交易所与阈值管理
+  - 订阅源与阈值管理（默认 Hyperliquid）
   - 虚拟支付流程（演示账单，不真实扣款）
-  - 导出 CSV + JSON（按交易所 + 时间范围）
+  - 导出 CSV + JSON（Hyperliquid + 时间范围）
   - AI 问答（DeepSeek）+ 对话历史记忆
   - 任务进度条（步骤化消息反馈）
 
@@ -180,18 +173,18 @@ docker compose up -d
 
 | 命令 | 说明 |
 |---|---|
-| `/query [mode] [symbol]` | 查询订单数据（`large/onchain/spot/futures`，默认 `large BTC`） |
-| `/export [symbol]` | 导出订单（先选交易所，再选 1d/7d/30d） |
+| `/query open [symbol] [page]` | 查询 Hyperliquid 开仓事件（分页） |
+| `/query wallet <address> [page]` | 查询钱包开仓历史 |
+| `/query top [1h|4h|24h]` | 查询开仓排行榜 |
+| `/export open [symbol] [1d/7d/30d]` | 导出 Hyperliquid 开仓数据 |
 | `/ask <问题>` | AI 分析（带聊天上下文） |
-| `/subscribe` | 订阅交易所/阈值 |
+| `/subscribe` | 订阅源/阈值 |
 | `/status` | 系统状态 |
 | `/stats` | 个人统计 |
 
-交易命令 `/buy` `/sell` `/positions` `/balance` 当前是演示流程，不会真实下单或扣款。
-
 ### 6.3 查询行为说明
-- `/query onchain`、`/query spot` 若无数据，会回退到同币种最近巨鲸事件
-- 受 CoinGlass 套餐影响，某些接口可能返回升级提示，采集器会自动暂停该源
+- 聚焦 Hyperliquid 鲸鱼开仓数据
+- 钱包查询建议输入完整地址前缀（如 `0xabc...`）
 
 ---
 
@@ -211,7 +204,7 @@ curl "http://127.0.0.1:8000/api/orders?limit=50&exchange=Binance&min_amount=5000
 
 参数：
 - `limit`：1-500
-- `source`：`cex_futures | cex_spot | dex_hyperliquid | onchain`
+- `source`：`dex_hyperliquid`
 - `exchange`：交易所名
 - `min_amount`：最小金额（USD）
 

@@ -5,8 +5,7 @@ from __future__ import annotations
 import aiosqlite
 import json
 import logging
-from typing import Any
-from typing import Any, Optional
+from typing import Optional
 
 from config.settings import get_settings
 from src.models.user import User, UserSubscription, ChatMessage
@@ -24,6 +23,10 @@ CREATE TABLE IF NOT EXISTS users (
     language TEXT DEFAULT 'zh',
     subscribed_exchanges TEXT,
     min_alert_threshold REAL DEFAULT 500000,
+    alerts_enabled BOOLEAN DEFAULT 1,
+    push_channel TEXT DEFAULT 'dm',
+    push_group_chat_id INTEGER,
+    custom_webhook_url TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_active_at TIMESTAMP
 );
@@ -63,6 +66,7 @@ class UserDatabase:
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
+        await self._ensure_users_columns()
         await self._conn.commit()
         logger.info("User database initialized at %s", self._db_path)
 
@@ -176,6 +180,42 @@ class UserDatabase:
             )
             await self._conn.commit()
 
+    async def update_push_settings(
+        self,
+        telegram_id: int,
+        alerts_enabled: Optional[bool] = None,
+        push_channel: Optional[str] = None,
+        push_group_chat_id: Optional[int] = None,
+        custom_webhook_url: Optional[str] = None,
+    ) -> None:
+        """Update per-user push routing settings."""
+        updates = []
+        params = []
+
+        if alerts_enabled is not None:
+            updates.append("alerts_enabled = ?")
+            params.append(1 if alerts_enabled else 0)
+
+        if push_channel is not None:
+            updates.append("push_channel = ?")
+            params.append(push_channel)
+
+        if push_group_chat_id is not None:
+            updates.append("push_group_chat_id = ?")
+            params.append(push_group_chat_id)
+
+        if custom_webhook_url is not None:
+            updates.append("custom_webhook_url = ?")
+            params.append(custom_webhook_url)
+
+        if updates:
+            params.append(telegram_id)
+            await self._conn.execute(
+                f"UPDATE users SET {', '.join(updates)} WHERE telegram_id = ?",
+                params,
+            )
+            await self._conn.commit()
+
     async def update_last_active(self, telegram_id: int) -> None:
         """Update user's last active timestamp."""
         await self._conn.execute(
@@ -240,8 +280,31 @@ class UserDatabase:
             last_name=row["last_name"],
             is_active=bool(row["is_active"]),
             is_admin=bool(row["is_admin"]),
+            language=row["language"] or "zh",
             subscribed_exchanges=json.loads(row["subscribed_exchanges"] or "[]"),
             min_alert_threshold=row["min_alert_threshold"],
+            alerts_enabled=bool(row["alerts_enabled"]) if "alerts_enabled" in row.keys() else True,
+            push_channel=row["push_channel"] if "push_channel" in row.keys() and row["push_channel"] else "dm",
+            push_group_chat_id=row["push_group_chat_id"] if "push_group_chat_id" in row.keys() else None,
+            custom_webhook_url=row["custom_webhook_url"] if "custom_webhook_url" in row.keys() else None,
             created_at=row["created_at"],
             last_active_at=row["last_active_at"],
         )
+
+    async def _ensure_users_columns(self) -> None:
+        """Add new columns for existing deployments (idempotent migration)."""
+        async with self._conn.execute("PRAGMA table_info(users)") as cursor:
+            cols = {row["name"] for row in await cursor.fetchall()}
+
+        migrations = []
+        if "alerts_enabled" not in cols:
+            migrations.append("ALTER TABLE users ADD COLUMN alerts_enabled BOOLEAN DEFAULT 1")
+        if "push_channel" not in cols:
+            migrations.append("ALTER TABLE users ADD COLUMN push_channel TEXT DEFAULT 'dm'")
+        if "push_group_chat_id" not in cols:
+            migrations.append("ALTER TABLE users ADD COLUMN push_group_chat_id INTEGER")
+        if "custom_webhook_url" not in cols:
+            migrations.append("ALTER TABLE users ADD COLUMN custom_webhook_url TEXT")
+
+        for sql in migrations:
+            await self._conn.execute(sql)

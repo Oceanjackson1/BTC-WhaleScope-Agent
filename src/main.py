@@ -9,11 +9,7 @@ import uvicorn
 
 from config.settings import get_settings
 from src.api.coinglass_client import CoinGlassClient
-from src.api.coinglass_ws import CoinGlassWSClient
-from src.collectors.large_order import FuturesLargeOrderCollector, SpotLargeOrderCollector
-from src.collectors.liquidation import LiquidationCollector, parse_ws_liquidation
 from src.collectors.hyperliquid import HyperliquidWhaleCollector
-from src.collectors.onchain import OnchainTransferCollector
 from src.engine.aggregator import Aggregator
 from src.engine.alert_rules import AlertEngine
 from src.push.heartbeat import HeartbeatReporter
@@ -91,7 +87,6 @@ class WhaleMonitor:
         )
 
         self._collectors: list[Any] = []
-        self._cg_ws:Optional[ CoinGlassWSClient] = None
         self._stopped = False
         self._stop_task: Optional[asyncio.Task[None]] = None
 
@@ -122,22 +117,14 @@ class WhaleMonitor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _on_ws_message(self, channel: str, data: list[dict[str, Any]]) -> None:
-        """Handle incoming WebSocket messages from CoinGlass."""
-        if channel == "liquidationOrders":
-            orders = parse_ws_liquidation(data)
-            if orders:
-                await self.aggregator.ingest(orders)
-
     async def start(self) -> None:
         await self.heartbeat.start()
         await self.heartbeat.report("working", "BTC WhaleScope Agent 启动中")
 
         logger.info("=" * 60)
-        logger.info("  BTC Whale Order Monitor v2.0.0")
-        logger.info("  Exchanges: %s", self.settings.exchange_list)
+        logger.info("  Hyperliquid Whale Open Monitor v3.0.0")
+        logger.info("  Scope: Hyperliquid whale OPEN positions only")
         logger.info("  Large order threshold: $%s", f"{self.settings.large_order_threshold:,.0f}")
-        logger.info("  Liquidation threshold: $%s", f"{self.settings.liquidation_threshold:,.0f}")
         logger.info("  Telegram Bot: %s", "enabled" if self.settings.tg_enabled else "disabled")
         logger.info("  Deepseek AI: %s", "enabled" if self.settings.deepseek_api_key else "disabled")
         logger.info("  Agent ID: %s", self.settings.agent_id)
@@ -169,18 +156,11 @@ class WhaleMonitor:
         ingest = self.aggregator.ingest
 
         self._collectors = [
-            FuturesLargeOrderCollector(self.cg_client, ingest),
-            SpotLargeOrderCollector(self.cg_client, ingest),
-            LiquidationCollector(self.cg_client, ingest),
             HyperliquidWhaleCollector(self.cg_client, ingest),
-            OnchainTransferCollector(self.cg_client, ingest),
         ]
 
         for c in self._collectors:
             await c.start()
-
-        self._cg_ws = CoinGlassWSClient(handler=self._on_ws_message)
-        await self._cg_ws.start()
 
         logger.info("All collectors started. System ready.")
         await self.heartbeat.report("working", "BTC WhaleScope Agent 运行中")
@@ -202,8 +182,6 @@ class WhaleMonitor:
         logger.info("Shutting down...")
         if report_idle:
             await self.heartbeat.report("idle", "")
-        if self._cg_ws:
-            await self._shutdown_step("CoinGlass WebSocket", self._cg_ws.stop())
         for c in self._collectors:
             await self._shutdown_step(f"collector:{c.name}", c.stop())
 

@@ -44,29 +44,25 @@ class AlertEngine:
     def _default_rules(self) -> list[AlertRule]:
         return [
             AlertRule(
-                name="mega_whale",
-                min_amount_usd=5_000_000,
-            ),
-            AlertRule(
-                name="large_cex_order",
-                min_amount_usd=1_000_000,
-                sources=[OrderSource.CEX_FUTURES, OrderSource.CEX_SPOT],
-                order_types=[OrderType.LARGE_LIMIT],
-            ),
-            AlertRule(
-                name="large_liquidation",
-                min_amount_usd=500_000,
-                order_types=[OrderType.LIQUIDATION],
-            ),
-            AlertRule(
-                name="hyperliquid_whale",
+                name="hyperliquid_open_standard",
                 min_amount_usd=1_000_000,
                 sources=[OrderSource.DEX_HYPERLIQUID],
+                order_types=[OrderType.WHALE_POSITION],
+                exchanges=["Hyperliquid"],
             ),
             AlertRule(
-                name="large_onchain",
+                name="hyperliquid_open_focus",
+                min_amount_usd=5_000_000,
+                sources=[OrderSource.DEX_HYPERLIQUID],
+                order_types=[OrderType.WHALE_POSITION],
+                exchanges=["Hyperliquid"],
+            ),
+            AlertRule(
+                name="hyperliquid_open_mega",
                 min_amount_usd=10_000_000,
-                sources=[OrderSource.ONCHAIN],
+                sources=[OrderSource.DEX_HYPERLIQUID],
+                order_types=[OrderType.WHALE_POSITION],
+                exchanges=["Hyperliquid"],
             ),
         ]
 
